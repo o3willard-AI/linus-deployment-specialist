@@ -1,0 +1,28 @@
+# Logs
+*.log
+/tmp/
+
+# Secrets (NEVER commit)
+**/credentials.json
+**/secrets.env
+**/*.pem
+**/*.key
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Node modules (if any)
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
