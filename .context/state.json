@@ -5,10 +5,10 @@
   "last_agent": "claude",
 
   "progress": {
-    "current_phase": 0,
-    "current_step": 5,
-    "phase_status": "in_progress",
-    "step_status": "in_progress"
+    "current_phase": 1,
+    "current_step": 0,
+    "phase_status": "not_started",
+    "step_status": "not_started"
   },
 
   "completed_milestones": [
@@ -39,6 +39,20 @@
       "description": "Shared library validation.sh created",
       "completed_at": "2025-12-27T23:28:00Z",
       "verification": "Script tested and working - 301 lines, comprehensive"
+    },
+    {
+      "phase": 0,
+      "step": 5,
+      "description": "MCP SSH server installed (ssh-mcp v1.4.0)",
+      "completed_at": "2025-12-28T02:16:00Z",
+      "verification": "npm list -g shows ssh-mcp@1.4.0, actual tools discovered: exec, sudo-exec"
+    },
+    {
+      "phase": 0,
+      "step": 6,
+      "description": "Shared library mcp-helpers.sh created and Phase 0 complete",
+      "completed_at": "2025-12-28T02:23:00Z",
+      "verification": "Script tested and working - 274 lines, MCP integration helpers"
     }
   ],
   
@@ -51,15 +65,22 @@
       "question": "Which packaging approach for agent support?",
       "decision": "Option C - Hybrid (Claude Skill + Gemini Conductor + Shared Scripts)",
       "rationale": "Supports both Claude and Gemini with shared source-of-truth scripts"
+    },
+    {
+      "id": "DEC-002",
+      "timestamp": "2025-12-28T02:16:00Z",
+      "question": "Which MCP SSH server package to use?",
+      "decision": "ssh-mcp v1.4.0 (NOT @essential-mcp/server-enhanced-ssh)",
+      "rationale": "@essential-mcp/server-enhanced-ssh does not exist on npm. ssh-mcp is most recent (Dec 2025), supports Linux+WSL, provides exec and sudo-exec tools"
     }
   ],
   
   "environment": {
-    "mcp_server_version": null,
-    "node_version": null,
-    "target_providers": ["proxmox", "aws", "qemu"],
+    "mcp_server_version": "ssh-mcp@1.4.0",
+    "node_version": "24.12.0",
+    "target_providers": ["proxmox"],
     "credentials_configured": {
-      "proxmox": false,
+      "proxmox": true,
       "aws": false,
       "qemu": false
     }
@@ -67,11 +88,11 @@
   
   "health": {
     "total_milestones": 44,
-    "completed_milestones": 4,
-    "completion_percentage": 9.1,
+    "completed_milestones": 6,
+    "completion_percentage": 13.6,
     "blockers_open": 0,
-    "blockers_resolved": 0,
+    "blockers_resolved": 1,
     "sessions_count": 1,
-    "estimated_sessions_remaining": 7
+    "estimated_sessions_remaining": 6
   }
 }
