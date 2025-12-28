@@ -70,36 +70,68 @@ EVERY significant action must log:
 
 ### 1.3 MCP SSH Server Usage
 
-The 8bit-wraith `mcp-server-enhanced-ssh` provides these capabilities:
+**ACTUAL IMPLEMENTATION:** We use `ssh-mcp` (v1.4.0+) from tufantunc, NOT `@essential-mcp/server-enhanced-ssh`.
 
-#### Available MCP Tools (Expected)
+**Installation:** `npm install -g ssh-mcp`
+**Repository:** https://github.com/tufantunc/ssh-mcp
+
+#### Available MCP Tools (VERIFIED)
 ```
-ssh_connect       - Establish SSH connection to host
-ssh_execute       - Run command on connected host
-ssh_upload        - Transfer file to remote host
-ssh_download      - Transfer file from remote host
-tmux_create       - Create persistent TMUX session
-tmux_attach       - Attach to existing TMUX session
-tmux_send         - Send command to TMUX session
-session_list      - List active sessions
-session_close     - Close a session
+exec         - Execute a shell command on the remote server
+sudo-exec    - Execute a shell command with sudo privileges
 ```
 
-#### Connection Pattern
-```bash
-# 1. Connect to target host
-ssh_connect(host="192.168.1.100", user="root", key_path="~/.ssh/id_rsa")
+**That's it!** Only 2 tools. Much simpler than initially documented.
 
-# 2. Execute commands
-ssh_execute(command="apt update && apt upgrade -y")
+#### Tool Usage Patterns
 
-# 3. Transfer files
-ssh_upload(local_path="./bootstrap.sh", remote_path="/tmp/bootstrap.sh")
-
-# 4. For long-running tasks, use TMUX
-tmux_create(session_name="provision-01")
-tmux_send(session="provision-01", command="./long-running-script.sh")
+**Pattern 1: Execute Command**
+```json
+{
+  "tool": "exec",
+  "arguments": {
+    "command": "apt update && apt upgrade -y"
+  }
+}
 ```
+
+**Pattern 2: Execute with Sudo**
+```json
+{
+  "tool": "sudo-exec",
+  "arguments": {
+    "command": "systemctl restart nginx"
+  }
+}
+```
+
+**Pattern 3: Upload Script (via base64 encoding)**
+```json
+{
+  "tool": "exec",
+  "arguments": {
+    "command": "echo 'BASE64_ENCODED_SCRIPT_HERE' | base64 -d > /tmp/script.sh && chmod +x /tmp/script.sh"
+  }
+}
+```
+
+The `mcp-helpers.sh` library provides helper functions to generate these commands:
+- `generate_upload_script_command()` - Creates base64 upload command
+- `generate_create_file_command()` - Creates file with content
+- `generate_file_exists_check()` - Checks if remote file exists
+
+#### Important Limitations
+
+⚠️ **No Native File Transfer:** ssh-mcp does NOT have built-in ssh_upload or ssh_download tools.
+- **Workaround:** Use base64 encoding over `exec` tool (see Pattern 3 above)
+
+⚠️ **No Persistent Sessions:** ssh-mcp does NOT have TMUX session management.
+- **Implication:** Each `exec` call is independent; no session state is maintained
+- **Workaround:** Include all setup in each command, or chain commands with &&
+
+⚠️ **No Connection Management:** ssh-mcp does NOT have ssh_connect/disconnect tools.
+- **How it works:** Connection is established per MCP server instance via command-line args
+- **Configuration:** Set --host, --user, --port, --key when starting the MCP server
 
 ### 1.4 Script Standards
 
