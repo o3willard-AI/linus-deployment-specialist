@@ -33,16 +33,33 @@ pkg_install() {
 
     # Detect package manager and install non-interactively
     if command -v apt-get &>/dev/null; then
-        DEBIAN_FRONTEND=noninteractive apt-get update -qq
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $packages
+        if ! DEBIAN_FRONTEND=noninteractive apt-get update -qq > /dev/null 2>&1; then
+            log_warn "apt-get update failed (continuing anyway)"
+        fi
+        if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $packages > /dev/null 2>&1; then
+            log_error "Failed to install packages: $packages"
+            return 1
+        fi
     elif command -v yum &>/dev/null; then
-        yum install -y -q $packages
+        if ! yum install -y -q $packages > /dev/null 2>&1; then
+            log_error "Failed to install packages: $packages"
+            return 1
+        fi
     elif command -v dnf &>/dev/null; then
-        dnf install -y -q $packages
+        if ! dnf install -y -q $packages > /dev/null 2>&1; then
+            log_error "Failed to install packages: $packages"
+            return 1
+        fi
     elif command -v zypper &>/dev/null; then
-        zypper install -y --quiet $packages
+        if ! zypper install -y --quiet $packages > /dev/null 2>&1; then
+            log_error "Failed to install packages: $packages"
+            return 1
+        fi
     elif command -v pacman &>/dev/null; then
-        pacman -S --noconfirm --quiet $packages
+        if ! pacman -S --noconfirm --quiet $packages > /dev/null 2>&1; then
+            log_error "Failed to install packages: $packages"
+            return 1
+        fi
     else
         log_error "No supported package manager found"
         return 1
@@ -323,12 +340,11 @@ download_file() {
         return 1
     fi
 
-    local curl_args="--silent --show-error --fail --location"
     if [[ -n "$output" ]]; then
-        curl_args="$curl_args --output $output"
+        curl --silent --show-error --fail --location --output "$output" "$url"
+    else
+        curl --silent --show-error --fail --location "$url"
     fi
-
-    curl $curl_args "$url"
     log_success "Downloaded: $url"
 }
 

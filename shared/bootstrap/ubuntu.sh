@@ -108,7 +108,7 @@ update_package_cache() {
 
     export DEBIAN_FRONTEND=noninteractive
 
-    if ! apt-get update -qq 2>&1 | grep -v "^$"; then
+    if ! apt-get update -qq > /dev/null 2>&1; then
         log_error "Failed to update package cache"
         return 6
     fi
@@ -152,7 +152,7 @@ install_essential_packages() {
 
     log_info "Installing: ${packages}"
 
-    if ! apt-get install -y -qq ${packages} 2>&1 | grep -v "^$"; then
+    if ! apt-get install -y -qq ${packages} > /dev/null 2>&1; then
         log_error "Failed to install essential packages"
         return 6
     fi
@@ -179,7 +179,7 @@ install_extra_packages() {
 
     log_info "Installing: ${packages}"
 
-    if ! apt-get install -y -qq ${packages} 2>&1 | grep -v "^$"; then
+    if ! apt-get install -y -qq ${packages} > /dev/null 2>&1; then
         log_warn "Failed to install some extra packages (non-fatal)"
     else
         log_success "Extra packages installed"
