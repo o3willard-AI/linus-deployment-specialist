@@ -5,6 +5,7 @@
 # Purpose: Create and configure VMs on Proxmox VE
 # Author: Linus Deployment Specialist (AI-generated)
 # Version: 1.0
+# Automation Level: 1 (Non-interactive design)
 #
 # Required Environment Variables:
 #   PROXMOX_NODE        - Proxmox node name (default: moxy)
