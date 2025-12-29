@@ -7,9 +7,9 @@
 # =============================================================================
 
 # Source logging first (if not already sourced)
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_VALIDATION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -z "${LINUS_LOGGING_LOADED:-}" ]]; then
-    source "${SCRIPT_DIR}/logging.sh"
+    source "${_VALIDATION_LIB_DIR}/logging.sh"
 fi
 
 # Mark validation as loaded

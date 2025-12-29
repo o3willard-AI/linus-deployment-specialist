@@ -6,6 +6,11 @@
 #   source "$(dirname "$0")/../lib/logging.sh"
 # =============================================================================
 
+# Include guard - prevent multiple sourcing
+if [[ -n "${LINUS_LOGGING_LOADED:-}" ]]; then
+    return 0
+fi
+
 # Colors (if terminal supports it)
 if [[ -t 1 ]]; then
     readonly RED='\033[0;31m'
@@ -176,3 +181,6 @@ log_section() {
         echo ""
     } >> "$LINUS_LOG_FILE"
 }
+
+# Mark as loaded to prevent multiple sourcing
+LINUS_LOGGING_LOADED=1
