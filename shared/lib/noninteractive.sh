@@ -22,42 +22,52 @@ fi
 # -----------------------------------------------------------------------------
 
 pkg_install() {
-    local packages="$@"
-
-    if [[ -z "$packages" ]]; then
+    if [[ $# -eq 0 ]]; then
         log_error "No packages specified for installation"
         return 1
     fi
 
-    log_info "Installing packages: $packages"
+    log_info "Installing packages: $*"
 
     # Detect package manager and install non-interactively
     if command -v apt-get &>/dev/null; then
-        if ! DEBIAN_FRONTEND=noninteractive apt-get update -qq > /dev/null 2>&1; then
-            log_warn "apt-get update failed (continuing anyway)"
+        # Skip update if cache is recent (less than 1 hour old)
+        local cache_age=999999
+        if [[ -f /var/cache/apt/pkgcache.bin ]]; then
+            cache_age=$(( $(date +%s) - $(stat -c %Y /var/cache/apt/pkgcache.bin) ))
         fi
-        if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $packages > /dev/null 2>&1; then
-            log_error "Failed to install packages: $packages"
+
+        if [[ $cache_age -gt 3600 ]]; then
+            if ! DEBIAN_FRONTEND=noninteractive apt-get update -qq > /dev/null 2>&1; then
+                log_warn "apt-get update failed (continuing anyway)"
+            fi
+        fi
+
+        local install_output
+        if ! install_output=$(DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@" 2>&1); then
+            log_error "Failed to install packages: $*"
+            echo "DEBUG: apt-get output:" >&2
+            echo "$install_output" >&2
             return 1
         fi
     elif command -v yum &>/dev/null; then
-        if ! yum install -y -q $packages > /dev/null 2>&1; then
-            log_error "Failed to install packages: $packages"
+        if ! yum install -y -q "$@" > /dev/null 2>&1; then
+            log_error "Failed to install packages: $*"
             return 1
         fi
     elif command -v dnf &>/dev/null; then
-        if ! dnf install -y -q $packages > /dev/null 2>&1; then
-            log_error "Failed to install packages: $packages"
+        if ! dnf install -y -q "$@" > /dev/null 2>&1; then
+            log_error "Failed to install packages: $*"
             return 1
         fi
     elif command -v zypper &>/dev/null; then
-        if ! zypper install -y --quiet $packages > /dev/null 2>&1; then
-            log_error "Failed to install packages: $packages"
+        if ! zypper install -y --quiet "$@" > /dev/null 2>&1; then
+            log_error "Failed to install packages: $*"
             return 1
         fi
     elif command -v pacman &>/dev/null; then
-        if ! pacman -S --noconfirm --quiet $packages > /dev/null 2>&1; then
-            log_error "Failed to install packages: $packages"
+        if ! pacman -S --noconfirm --quiet "$@" > /dev/null 2>&1; then
+            log_error "Failed to install packages: $*"
             return 1
         fi
     else
@@ -65,7 +75,7 @@ pkg_install() {
         return 1
     fi
 
-    log_success "Packages installed: $packages"
+    log_success "Packages installed: $*"
 }
 
 pkg_update() {
@@ -341,9 +351,15 @@ download_file() {
     fi
 
     if [[ -n "$output" ]]; then
-        curl --silent --show-error --fail --location --output "$output" "$url"
+        if ! curl --silent --show-error --fail --location --output "$output" "$url"; then
+            log_error "Failed to download: $url"
+            return 1
+        fi
     else
-        curl --silent --show-error --fail --location "$url"
+        if ! curl --silent --show-error --fail --location "$url"; then
+            log_error "Failed to download: $url"
+            return 1
+        fi
     fi
     log_success "Downloaded: $url"
 }
