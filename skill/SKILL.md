@@ -66,30 +66,130 @@ Configure a fresh VM with base packages and development tools.
 - "Set up the VM..."
 - "Install packages on..."
 - "Configure the server..."
+- "Bootstrap Ubuntu..."
 
-**Bootstrap Levels:**
-- `basic` - Essential packages only (curl, wget, git, vim)
-- `dev` - Development tools (Python, Node.js, Docker)
-- `full` - Everything including optional tools
+**Available Bootstrap Scripts:** ✅ **IMPLEMENTED**
+
+#### 2.1: OS Bootstrap (`shared/bootstrap/ubuntu.sh`)
+**Purpose:** Initial OS-level setup with essential packages
+
+**Installs:**
+- Essential tools: curl, wget, git, vim, nano, tmux, screen, htop, ncdu, tree
+- Configures timezone (default: UTC)
+- Configures locale (default: en_US.UTF-8)
+- Optional extras: build-essential, software-properties-common
+
+**Environment Variables:**
+- `TIMEZONE` - System timezone (default: UTC)
+- `LOCALE` - System locale (default: en_US.UTF-8)
+- `INSTALL_EXTRAS` - Install build tools (default: false)
+- `SKIP_UPGRADE` - Skip apt upgrade (default: false)
+
+**Duration:** ~2 minutes
+
+#### 2.2: Dev Tools (`shared/configure/dev-tools.sh`)
+**Purpose:** Install development environment
+
+**Installs:**
+- Python 3.12 + pip + venv
+- Node.js 22 LTS (via NodeSource)
+- Docker CE + docker-compose plugin
+- Configures Docker service and user permissions
+
+**Environment Variables:**
+- `PYTHON_VERSION` - Python version (default: 3)
+- `NODE_VERSION` - Node.js version (default: 22)
+- `INSTALL_DOCKER` - Install Docker (default: true)
+- `DOCKER_USER` - User for docker group (default: ubuntu)
+
+**Duration:** ~5-7 minutes (Docker install takes time)
+
+#### 2.3: Base Packages (`shared/configure/base-packages.sh`)
+**Purpose:** Install build tools and utilities
+
+**Installs:**
+- Build tools: gcc, g++, make, cmake, gdb
+- SSL/Crypto: openssl, ca-certificates, libssl-dev
+- Network: net-tools, nmap, dnsutils, netcat, traceroute
+- Utilities: jq, unzip, zip, tar, rsync, less, which, file
+
+**Environment Variables:**
+- `INSTALL_BUILD_TOOLS` - Install gcc, make, etc. (default: true)
+- `INSTALL_NETWORK_TOOLS` - Install network utilities (default: true)
+
+**Duration:** ~1 minute
 
 **Workflow:**
-1. Upload bootstrap script to newly created VM via MCP `exec` (base64 encoded)
-2. Execute the OS-specific bootstrap script (`ubuntu.sh`, `almalinux.sh`, etc.)
-3. Monitor execution for `LINUS_RESULT:SUCCESS`
-4. Verify installed packages
-5. Return bootstrap status
+1. Upload required libraries (`logging.sh`, `validation.sh`, `noninteractive.sh`) to VM
+2. Upload bootstrap script(s) to VM via MCP `exec` (base64 encoded)
+3. Execute script: `bash ubuntu.sh` (or dev-tools.sh, base-packages.sh)
+4. Monitor execution for `LINUS_RESULT:SUCCESS`
+5. Verify installed packages with version checks
+6. Return bootstrap status with installed tools list
 
 ---
 
 ### 3. Full Deployment (Provision + Bootstrap)
 
-Create and configure a complete environment in one step.
+Create and configure a complete development environment in one workflow.
+
+**Natural Language Triggers:**
+- "Create a fully configured development VM..."
+- "Set up a complete environment with Python and Docker..."
+- "I need a VM ready for development..."
+
+**Total Duration:** ~10-12 minutes
 
 **Workflow:**
-1. Execute Provision VM workflow (steps 1-7)
-2. Execute Bootstrap OS workflow (steps 1-5)
-3. Run final verification tests
-4. Return complete environment details with SSH access string
+
+#### Step 1: Provision VM (~2 minutes)
+1. Execute `proxmox.sh` on Proxmox host
+2. Parse output for VM_ID, VM_IP, VM_USER
+3. Verify SSH accessibility
+
+#### Step 2: Bootstrap Ubuntu (~2 minutes)
+1. Upload `ubuntu.sh` and libraries to VM
+2. Execute: `sudo bash ubuntu.sh`
+3. Verify essential packages installed
+
+#### Step 3: Install Dev Tools (~5-7 minutes)
+1. Upload `dev-tools.sh` and libraries to VM
+2. Execute: `sudo bash dev-tools.sh`
+3. Verify Python, Node.js, Docker installed
+
+#### Step 4: Install Base Packages (~1 minute)
+1. Upload `base-packages.sh` and libraries to VM
+2. Execute: `sudo bash base-packages.sh`
+3. Verify build tools and utilities installed
+
+#### Step 5: Final Verification
+1. SSH to VM and run version checks:
+   - `python3 --version`
+   - `node --version`
+   - `docker --version`
+   - `gcc --version`
+2. Verify Docker service is running
+3. Confirm disk space and memory allocation
+
+**Return to User:**
+```
+✅ Full Development Environment Ready!
+
+VM Details:
+- VM ID: 113
+- IP: 192.168.101.113
+- SSH: ssh ubuntu@192.168.101.113
+
+Installed Tools:
+- Python 3.12.0
+- Node.js v22.11.0
+- Docker 24.0.7
+- GCC 11.4.0
+- Build tools (make, cmake, gdb)
+- Utilities (jq, curl, wget, git)
+
+Total Time: 10 minutes 23 seconds
+```
 
 ---
 

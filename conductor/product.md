@@ -34,15 +34,17 @@ A tool where AI agents (Claude or Gemini) can:
    - ✅ Configure CPU, RAM, storage
    - ✅ Assign network/IP (QEMU agent + fallback nmap)
 
-2. **OS Bootstrapping** ⏳ **PARTIAL**
+2. **OS Bootstrapping** ✅ **IMPLEMENTED**
    - ✅ Ubuntu 24.04 LTS (via cloud-init template)
+   - ✅ ubuntu.sh - Essential packages, timezone, locale (330 lines, ~2 min)
    - ⏳ AlmaLinux 9.x (planned)
    - ⏳ Rocky Linux 9.x (planned)
    - ⏳ AWS Linux 2023 (planned)
 
-3. **Basic Configuration** ⏳ **PLANNED**
-   - ⏳ Essential packages (planned - bootstrap scripts)
-   - ⏳ Development tools (planned - Python, Node, Docker)
+3. **Basic Configuration** ✅ **IMPLEMENTED**
+   - ✅ Essential packages (curl, wget, git, vim, tmux, htop, tree)
+   - ✅ Development tools (dev-tools.sh: Python 3.12, Node.js 22, Docker CE)
+   - ✅ Build tools (base-packages.sh: gcc, make, cmake, network utils)
    - ✅ SSH access setup (working via cloud-init)
 
 4. **MCP Integration** ✅ **IMPLEMENTED**
@@ -110,7 +112,7 @@ A tool where AI agents (Claude or Gemini) can:
 - ⏳ Phase 4: Local Dev UI (optional - can be deferred)
 - ⏳ Phase 5: Documentation (in progress)
 
-**Progress: 15/44 milestones (34.1%)**
+**Progress: 21/44 milestones (47.7%)**
 
 **Key Architectural Decisions:**
 1. Using ssh-mcp v1.4.0 instead of @essential-mcp/server-enhanced-ssh (simpler, correct architecture)

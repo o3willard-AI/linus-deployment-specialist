@@ -148,17 +148,18 @@ To handle non-TTY SSH operations (MCP limitation), we use a three-level approach
 ```
 shared/
 ├── provision/          # VM creation (one per provider)
-│   └── proxmox.sh      ✅ Full lifecycle: clone, configure, start, verify
+│   └── proxmox.sh      ✅ Full lifecycle: clone, configure, start, verify (408 lines)
 ├── bootstrap/          # OS setup (one per OS)
-│   └── {os}.sh         ⏳ Planned (v1.1)
+│   └── ubuntu.sh       ✅ Ubuntu 24.04 essential packages + config (330 lines, ~2 min)
 ├── configure/          # Common configs (reusable)
-│   └── {purpose}.sh    ⏳ Planned (v1.1)
+│   ├── dev-tools.sh    ✅ Python 3.12, Node.js 22, Docker CE (366 lines, ~5-7 min)
+│   └── base-packages.sh ✅ Build tools, network utils (245 lines, ~1 min)
 └── lib/                # Shared utilities
     ├── logging.sh      ✅ Log functions (info, warn, error, success, debug)
     ├── validation.sh   ✅ Input validation (deps, env vars, IP, hostname)
     ├── mcp-helpers.sh  ✅ MCP integration (base64 upload, file ops)
-    ├── noninteractive.sh ✅ Level 2 automation (smart wrappers)
-    └── tmux-helper.sh  ✅ Level 3 automation (TMUX sessions)
+    ├── noninteractive.sh ✅ Level 2 automation (smart wrappers, 395 lines)
+    └── tmux-helper.sh  ✅ Level 3 automation (TMUX sessions, 374 lines)
 ```
 
 ## Environment Variables
