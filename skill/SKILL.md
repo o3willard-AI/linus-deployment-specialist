@@ -18,15 +18,15 @@ You are **Linus Deployment Specialist**, an infrastructure automation tool for c
 ## Quick Reference
 
 ### Supported Providers
-- `proxmox` - Proxmox VE (via API)
-- `aws` - AWS EC2 (via CLI)
-- `qemu` - QEMU/libvirt (via virsh)
+- `proxmox` - Proxmox VE (via pvesh/qm) ✅ **IMPLEMENTED**
+- `aws` - AWS EC2 (via CLI) ⏳ Planned
+- `qemu` - QEMU/libvirt (via virsh) ⏳ Planned
 
 ### Supported Operating Systems
-- `ubuntu` - Ubuntu 24.04 LTS
-- `almalinux` - AlmaLinux 9.x
-- `rocky` - Rocky Linux 9.x
-- `aws-linux` - Amazon Linux 2023
+- `ubuntu` - Ubuntu 24.04 LTS ✅ **READY** (via Proxmox cloud-init template)
+- `almalinux` - AlmaLinux 9.x ⏳ Planned
+- `rocky` - Rocky Linux 9.x ⏳ Planned
+- `aws-linux` - Amazon Linux 2023 ⏳ Planned
 
 ---
 
@@ -112,23 +112,75 @@ All scripts are in the `shared/` directory:
 ```
 shared/
 ├── provision/
-│   ├── proxmox.sh
-│   ├── aws.sh
-│   └── qemu.sh
-├── bootstrap/
-│   ├── ubuntu.sh
-│   ├── almalinux.sh
-│   ├── rocky.sh
-│   └── aws-linux.sh
-├── configure/
-│   ├── base-packages.sh
-│   ├── dev-tools.sh
-│   └── ssh-hardening.sh
+│   └── proxmox.sh          ✅ Full VM lifecycle management
+├── bootstrap/              ⏳ Planned
+├── configure/              ⏳ Planned
 └── lib/
-    ├── logging.sh
-    ├── validation.sh
-    └── mcp-helpers.sh
+    ├── logging.sh          ✅ Logging and output formatting
+    ├── validation.sh       ✅ Input validation and checks
+    ├── mcp-helpers.sh      ✅ MCP integration utilities
+    ├── noninteractive.sh   ✅ Level 2 automation (smart wrappers)
+    └── tmux-helper.sh      ✅ Level 3 automation (session mgmt)
 ```
+
+---
+
+## Hybrid Automation Strategy
+
+This project uses a **three-level automation approach** to handle operations via non-TTY SSH (MCP ssh-mcp):
+
+### Level 1: Non-Interactive Design (95% of use cases) ⭐ **PREFERRED**
+**Philosophy:** Design scripts to NEVER prompt for input
+
+- Use `-y`, `-f`, `-q` flags for all commands
+- Set `DEBIAN_FRONTEND=noninteractive` for apt operations
+- Provide defaults via environment variables
+- Example: `apt-get install -y curl` instead of `apt-get install curl`
+
+**When to use:** ALL production automation scripts, including `proxmox.sh`
+
+### Level 2: Smart Wrapper Library
+**Philosophy:** Centralize non-interactive logic in reusable functions
+
+**Library:** `shared/lib/noninteractive.sh`
+
+Available functions:
+- `pkg_install`, `pkg_update`, `pkg_upgrade` - Cross-distro package management
+- `safe_remove`, `safe_copy` - Safe file operations
+- `git_clone_quiet`, `git_pull_quiet` - Quiet git operations
+- `service_start`, `service_enable`, `service_restart` - Service management
+- `user_create`, `user_add_to_group` - User management
+- `download_file` - Network operations
+
+**When to use:** Complex multi-tool workflows, cross-distro compatibility needed
+
+### Level 3: TMUX Session Management 🚀
+**Philosophy:** For operations that truly need persistence or interaction
+
+**Library:** `shared/lib/tmux-helper.sh`
+
+Available functions:
+- `tmux_create_session` - Create persistent session
+- `tmux_monitor_output` - Monitor for success/error patterns
+- `tmux_capture_pane` - Capture session output
+- `tmux_send_keys` - Send input mid-execution
+- `tmux_remote_*` - Remote TMUX operations (for Proxmox workflows)
+
+**When to use:**
+- Long-running operations (> 5 minutes)
+- Operations that might disconnect
+- Truly interactive third-party tools
+
+**Decision Tree:**
+```
+Can you add -y/-f flags? → YES → Level 1 ✅ DONE
+  ↓ NO
+Common operation? → YES → Level 2 (noninteractive.sh)
+  ↓ NO
+Long-running/interactive? → YES → Level 3 (tmux-helper.sh)
+```
+
+**Documentation:** See `.context/AUTOMATION-STRATEGY.md` for complete guide
 
 ---
 

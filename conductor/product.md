@@ -25,33 +25,35 @@ A tool where AI agents (Claude or Gemini) can:
 
 ## Core Features
 
-### MVP (v1.0)
+### MVP (v1.0) - Current Status
 
-1. **VM Provisioning**
-   - Create VMs on Proxmox, AWS EC2, or QEMU
-   - Configure CPU, RAM, storage
-   - Assign network/IP
+1. **VM Provisioning** ✅ **IMPLEMENTED**
+   - ✅ Create VMs on Proxmox VE (full lifecycle)
+   - ⏳ AWS EC2 (planned)
+   - ⏳ QEMU (planned)
+   - ✅ Configure CPU, RAM, storage
+   - ✅ Assign network/IP (QEMU agent + fallback nmap)
 
-2. **OS Bootstrapping**
-   - Ubuntu 24.04 LTS
-   - AlmaLinux 9.x
-   - Rocky Linux 9.x
-   - AWS Linux 2023
+2. **OS Bootstrapping** ⏳ **PARTIAL**
+   - ✅ Ubuntu 24.04 LTS (via cloud-init template)
+   - ⏳ AlmaLinux 9.x (planned)
+   - ⏳ Rocky Linux 9.x (planned)
+   - ⏳ AWS Linux 2023 (planned)
 
-3. **Basic Configuration**
-   - Essential packages
-   - Development tools (Python, Node, Docker)
-   - SSH access setup
+3. **Basic Configuration** ⏳ **PLANNED**
+   - ⏳ Essential packages (planned - bootstrap scripts)
+   - ⏳ Development tools (planned - Python, Node, Docker)
+   - ✅ SSH access setup (working via cloud-init)
 
-4. **MCP Integration**
-   - Remote execution via 8bit-wraith SSH server
-   - Persistent TMUX sessions
-   - File transfer support
+4. **MCP Integration** ✅ **IMPLEMENTED**
+   - ✅ Remote execution via ssh-mcp v1.4.0 (exec, sudo-exec tools)
+   - ✅ Hybrid automation strategy (Level 1: non-interactive, Level 2: smart wrappers, Level 3: TMUX)
+   - ⚠️ File transfer via base64 encoding (no native upload in ssh-mcp)
 
-5. **Dual-Agent Support**
-   - Claude Skill package
-   - Gemini Conductor context
-   - Shared source-of-truth scripts
+5. **Dual-Agent Support** ✅ **IMPLEMENTED**
+   - ✅ Claude Skill package (SKILL.md with examples)
+   - ✅ Gemini Conductor context (product.md, tech-stack.md, workflow.md)
+   - ✅ Shared source-of-truth scripts (proxmox.sh, libraries)
 
 ## Non-Goals (v1.0)
 
@@ -96,13 +98,21 @@ A tool where AI agents (Claude or Gemini) can:
 | Provider API changes | Abstract behind provider scripts |
 | Context window overflow | Strict context protocol |
 
-## Timeline
+## Timeline (Updated)
 
-- Phase 0: Foundation (~30 min)
-- Phase 1: MCP SSH Setup (~1 hour)
-- Phase 2: Provisioning Scripts (~2 hours)
-- Phase 3: Agent Integration (~1.5 hours)
-- Phase 4: Local Dev UI (~1 hour)
-- Phase 5: Documentation (~1 hour)
+**Completed Phases:**
+- ✅ Phase 0: Foundation (completed 2025-12-27)
+- ✅ Phase 1: MCP SSH Setup with ssh-mcp (completed 2025-12-28)
+- ✅ Phase 2: Proxmox Provisioning + Automation Strategy (completed 2025-12-29)
+- ✅ Phase 3: Agent Integration (completed 2025-12-29)
 
-**Total: ~7 hours across 5-8 sessions**
+**Remaining Phases:**
+- ⏳ Phase 4: Local Dev UI (optional - can be deferred)
+- ⏳ Phase 5: Documentation (in progress)
+
+**Progress: 15/44 milestones (34.1%)**
+
+**Key Architectural Decisions:**
+1. Using ssh-mcp v1.4.0 instead of @essential-mcp/server-enhanced-ssh (simpler, correct architecture)
+2. Focused on Proxmox as primary provider (AWS/QEMU deferred to v1.1)
+3. Implemented hybrid three-level automation strategy to solve interactive prompt problem

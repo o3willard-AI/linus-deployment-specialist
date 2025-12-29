@@ -4,18 +4,19 @@
 
 | Component | Choice | Version | Rationale |
 |-----------|--------|---------|-----------|
-| MCP SSH Server | @essential-mcp/server-enhanced-ssh | latest | TMUX sessions, file transfer, persistent connections |
-| Scripting | Bash (POSIX) | N/A | Universal, no dependencies, works everywhere |
-| Local UI | HTML + vanilla JS | N/A | Zero build step, maximum simplicity |
+| MCP SSH Server | ssh-mcp | 1.4.0 | SSH client architecture (connects TO remotes), exec/sudo-exec tools |
+| Automation Strategy | Hybrid 3-level | v1.0 | Level 1 (non-interactive), Level 2 (wrappers), Level 3 (TMUX) |
+| Scripting | Bash (POSIX) | 4.x+ | Universal, no dependencies, works everywhere |
+| Local UI | HTML + vanilla JS | N/A | Zero build step, maximum simplicity (deferred to v1.1) |
 | Version Control | Git | 2.x | Standard, available everywhere |
 
 ## VM Providers
 
-| Provider | API/Tool | Authentication | Notes |
-|----------|----------|----------------|-------|
-| Proxmox | REST API via curl | Token or user/pass | Primary enterprise target |
-| AWS | AWS CLI | IAM credentials | Cloud provider option |
-| QEMU | virsh/libvirt | Local socket | Local development option |
+| Provider | API/Tool | Authentication | Status | Notes |
+|----------|----------|----------------|--------|-------|
+| Proxmox | qm/pvesh CLI | SSH key | ✅ Implemented | Primary target (v1.0) |
+| AWS | AWS CLI | IAM credentials | ⏳ Planned | Cloud option (v1.1) |
+| QEMU | virsh/libvirt | Local socket | ⏳ Planned | Local dev (v1.1) |
 
 ## Target Operating Systems
 
@@ -43,29 +44,44 @@
 
 ### Package
 ```
-@essential-mcp/server-enhanced-ssh
+ssh-mcp
 ```
 
 ### Installation
 ```bash
-npm install -g @essential-mcp/server-enhanced-ssh
+npm install -g ssh-mcp
 ```
 
-### Configuration Location
-```
-~/.mcp/ssh/config/
+### Repository
+https://github.com/tufantunc/ssh-mcp
+
+### Configuration (Claude Code)
+```json
+{
+  "mcpServers": {
+    "linus-ssh": {
+      "command": "ssh-mcp",
+      "args": [
+        "--host=192.168.101.155",
+        "--port=22",
+        "--user=root",
+        "--key=/home/user/.ssh/id_rsa",
+        "--timeout=180000",
+        "--maxChars=none"
+      ]
+    }
+  }
+}
 ```
 
-### Default Port
-```
-6480
-```
+### Available Tools
+- `exec` - Execute shell command on remote server
+- `sudo-exec` - Execute command with sudo privileges
 
-### Key Features Used
-- Persistent TMUX sessions
-- Multi-window support
-- Smart session recovery
-- File upload/download
+### Limitations
+- No native file upload/download (use base64 encoding workaround)
+- Commands timeout after configured timeout (default: 60s)
+- Non-TTY session (cannot handle interactive prompts)
 
 ## Script Standards
 
@@ -98,18 +114,51 @@ LINUS_RESULT:SUCCESS|FAILURE
 LINUS_KEY:VALUE
 ```
 
+## Hybrid Automation Strategy
+
+To handle non-TTY SSH operations (MCP limitation), we use a three-level approach:
+
+### Level 1: Non-Interactive Design (95% of cases) ⭐
+- Use `-y`, `-f`, `-q` flags on all commands
+- Set `DEBIAN_FRONTEND=noninteractive` for apt
+- Provide defaults via environment variables
+- **Example:** `apt-get install -y curl` (not `apt-get install curl`)
+
+### Level 2: Smart Wrapper Library
+- **File:** `shared/lib/noninteractive.sh`
+- **Functions:** `pkg_install`, `pkg_update`, `service_start`, `safe_copy`, etc.
+- **Purpose:** Cross-distro compatibility, reusable patterns
+- **Example:** `pkg_install nginx` works on Ubuntu, AlmaLinux, Rocky
+
+### Level 3: TMUX Session Management
+- **File:** `shared/lib/tmux-helper.sh`
+- **Functions:** `tmux_create_session`, `tmux_monitor_output`, `tmux_remote_*`
+- **Purpose:** Long-running operations (>5 min), session persistence
+- **Example:** Kubernetes installation, large database imports
+
+**Decision Tree:**
+1. Can you add non-interactive flags? → Use Level 1
+2. Is it a common operation? → Use Level 2 wrapper
+3. Is it long-running or interactive? → Use Level 3 TMUX
+
+**Documentation:** See `.context/AUTOMATION-STRATEGY.md`
+
 ## File Structure Convention
 
 ```
 shared/
 ├── provision/          # VM creation (one per provider)
-│   └── {provider}.sh
+│   └── proxmox.sh      ✅ Full lifecycle: clone, configure, start, verify
 ├── bootstrap/          # OS setup (one per OS)
-│   └── {os}.sh
+│   └── {os}.sh         ⏳ Planned (v1.1)
 ├── configure/          # Common configs (reusable)
-│   └── {purpose}.sh
+│   └── {purpose}.sh    ⏳ Planned (v1.1)
 └── lib/                # Shared utilities
-    └── {utility}.sh
+    ├── logging.sh      ✅ Log functions (info, warn, error, success, debug)
+    ├── validation.sh   ✅ Input validation (deps, env vars, IP, hostname)
+    ├── mcp-helpers.sh  ✅ MCP integration (base64 upload, file ops)
+    ├── noninteractive.sh ✅ Level 2 automation (smart wrappers)
+    └── tmux-helper.sh  ✅ Level 3 automation (TMUX sessions)
 ```
 
 ## Environment Variables
