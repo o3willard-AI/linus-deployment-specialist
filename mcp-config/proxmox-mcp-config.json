@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "linus-ssh": {
+      "command": "ssh-mcp",
+      "args": [
+        "--host=192.168.101.155",
+        "--port=22",
+        "--user=root",
+        "--key=/home/sblanken/.ssh/linus_proxmox",
+        "--timeout=120000",
+        "--maxChars=none"
+      ]
+    }
+  }
+}
