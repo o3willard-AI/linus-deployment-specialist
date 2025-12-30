@@ -151,7 +151,7 @@ select_instance_type() {
     fi
 
     # Default fallback
-    log_warn "No exact match for ${VM_CPU} CPU / ${VM_RAM}MB RAM, using t3.medium"
+    log_warn "No exact match for ${VM_CPU} CPU / ${VM_RAM}MB RAM, using t3.medium" >&2
     echo "t3.medium"
 }
 
@@ -165,7 +165,7 @@ get_ubuntu_ami() {
         return 0
     fi
 
-    log_info "Finding latest Ubuntu 24.04 AMI..."
+    log_info "Finding latest Ubuntu 24.04 AMI..." >&2
 
     local ami_id
     ami_id=$(aws ec2 describe-images \
@@ -178,7 +178,7 @@ get_ubuntu_ami() {
         --output text)
 
     if [[ -z "$ami_id" || "$ami_id" == "None" ]]; then
-        log_error "Could not find Ubuntu 24.04 AMI"
+        log_error "Could not find Ubuntu 24.04 AMI" >&2
         return 5
     fi
 
@@ -207,12 +207,12 @@ get_or_create_security_group() {
         --output text 2>/dev/null || echo "")
 
     if [[ -n "$sg_id" && "$sg_id" != "None" ]]; then
-        log_info "Using existing security group: ${sg_id}"
+        log_info "Using existing security group: ${sg_id}" >&2
         echo "$sg_id"
         return 0
     fi
 
-    log_info "Creating security group: ${sg_name}"
+    log_info "Creating security group: ${sg_name}" >&2
 
     # Get default VPC ID
     local vpc_id
@@ -223,7 +223,7 @@ get_or_create_security_group() {
         --output text)
 
     if [[ -z "$vpc_id" || "$vpc_id" == "None" ]]; then
-        log_error "No default VPC found"
+        log_error "No default VPC found" >&2
         return 4
     fi
 
@@ -246,7 +246,7 @@ get_or_create_security_group() {
         --port 22 \
         --cidr 0.0.0.0/0 >/dev/null
 
-    log_success "Created security group: ${sg_id}"
+    log_success "Created security group: ${sg_id}" >&2
     echo "$sg_id"
 }
 
@@ -341,12 +341,20 @@ wait_for_instance() {
 wait_for_ssh() {
     log_step "4" "Waiting for SSH to be ready"
 
+    # Determine SSH key path
+    local ssh_key_path="${AWS_SSH_KEY_PATH:-$HOME/.ssh/${AWS_KEY_NAME}.pem}"
+
+    if [[ ! -f "$ssh_key_path" ]]; then
+        log_error "SSH key not found: ${ssh_key_path}" >&2
+        return 6
+    fi
+
     local max_wait=180
     local elapsed=0
     local interval=5
 
     while [[ $elapsed -lt $max_wait ]]; do
-        if timeout 5 ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+        if timeout 5 ssh -i "$ssh_key_path" -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
             "${INSTANCE_USER}@${INSTANCE_IP}" "echo SSH ready" >/dev/null 2>&1; then
             log_success "SSH is ready at ${INSTANCE_USER}@${INSTANCE_IP}"
             return 0
