@@ -14,8 +14,8 @@
 
 | Provider | API/Tool | Authentication | Status | Notes |
 |----------|----------|----------------|--------|-------|
-| Proxmox | qm/pvesh CLI | SSH key | ✅ Implemented | Primary target (v1.0) |
-| AWS | AWS CLI | IAM credentials | ⏳ Planned | Cloud option (v1.1) |
+| Proxmox | qm/pvesh CLI | SSH key | ✅ Implemented | Primary on-prem (v1.0) |
+| AWS | AWS CLI | IAM credentials/Key Pair | ✅ Implemented | Cloud option (v1.0) |
 | QEMU | virsh/libvirt | Local socket | ⏳ Planned | Local dev (v1.1) |
 
 ## Target Operating Systems
@@ -148,7 +148,8 @@ To handle non-TTY SSH operations (MCP limitation), we use a three-level approach
 ```
 shared/
 ├── provision/          # VM creation (one per provider)
-│   └── proxmox.sh      ✅ Full lifecycle: clone, configure, start, verify (408 lines)
+│   ├── proxmox.sh      ✅ Proxmox: clone, configure, start, verify (408 lines)
+│   └── aws.sh          ✅ AWS EC2: provision, configure, wait SSH (405 lines)
 ├── bootstrap/          # OS setup (one per OS)
 │   └── ubuntu.sh       ✅ Ubuntu 24.04 essential packages + config (330 lines, ~2 min)
 ├── configure/          # Common configs (reusable)

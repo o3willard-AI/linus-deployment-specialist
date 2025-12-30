@@ -29,7 +29,7 @@ A tool where AI agents (Claude or Gemini) can:
 
 1. **VM Provisioning** ✅ **IMPLEMENTED**
    - ✅ Create VMs on Proxmox VE (full lifecycle)
-   - ⏳ AWS EC2 (planned)
+   - ✅ AWS EC2 (full instance provisioning with auto-AMI detection)
    - ⏳ QEMU (planned)
    - ✅ Configure CPU, RAM, storage
    - ✅ Assign network/IP (QEMU agent + fallback nmap)
@@ -108,13 +108,17 @@ A tool where AI agents (Claude or Gemini) can:
 - ✅ Phase 2: Proxmox Provisioning + Automation Strategy (completed 2025-12-29)
 - ✅ Phase 3: Agent Integration (completed 2025-12-29)
 
-**Remaining Phases:**
-- ⏳ Phase 4: Local Dev UI (optional - can be deferred)
-- ⏳ Phase 5: Documentation (in progress)
+**Current Phase:**
+- 🔄 Phase 4: Additional Providers (AWS - in progress)
 
-**Progress: 21/44 milestones (47.7%)**
+**Remaining Phases:**
+- ⏳ Phase 5: QEMU Provider (optional)
+- ⏳ Phase 6: Local Dev UI (optional - can be deferred)
+
+**Progress: 25/44 milestones (56.8%)**
 
 **Key Architectural Decisions:**
 1. Using ssh-mcp v1.4.0 instead of @essential-mcp/server-enhanced-ssh (simpler, correct architecture)
-2. Focused on Proxmox as primary provider (AWS/QEMU deferred to v1.1)
-3. Implemented hybrid three-level automation strategy to solve interactive prompt problem
+2. Implemented hybrid three-level automation strategy to solve interactive prompt problem
+3. Full deployment testing revealed 5 critical bugs - all fixed, Ubuntu + Proxmox validated production-ready
+4. AWS EC2 provider now implemented with auto-instance-type selection and AMI detection
