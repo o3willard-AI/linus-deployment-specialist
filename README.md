@@ -10,6 +10,42 @@ An infrastructure automation tool that enables AI agents to create, configure, a
 
 ---
 
+## 🤖 For AI Coding Agents
+
+**This project is designed for autonomous use by AI coding and QA agents.**
+
+If you are an AI agent (Claude, Gemini, etc.) tasked with provisioning Linux VMs, you can autonomously install and use this entire project without human intervention:
+
+### Quick Start for Agents
+
+1. **Installation:** Follow [INSTALL.md](INSTALL.md) for autonomous installation protocol
+   - Includes verification steps with exit codes
+   - OS-specific dependency installation
+   - Complete system validation
+
+2. **Usage:** Follow [AGENT-GUIDE.md](AGENT-GUIDE.md) for autonomous operation
+   - Provider configuration with verification
+   - VM provisioning workflows with output parsing
+   - Troubleshooting decision trees
+   - End-to-end examples
+
+### Key Features for Autonomous Operation
+
+- **Structured Output:** All scripts output `LINUS_RESULT:SUCCESS|FAILURE` with parseable key-value pairs
+- **Exit Codes:** All operations return proper exit codes for success/failure detection
+- **Non-Interactive:** All scripts use `-y`, `-f`, `-q` flags for autonomous execution
+- **Verification Commands:** Every step includes verification commands with expected outputs
+- **Decision Trees:** Comprehensive troubleshooting procedures for autonomous error resolution
+
+### Human Users
+
+If you are a human wanting to use this tool:
+- Point your AI coding agent to this repository
+- Ensure the agent has tool use enabled
+- The agent will handle installation, configuration, and operation autonomously
+
+---
+
 ## 🎯 What Is This?
 
 **Linus** helps AI agents (Claude, Gemini, etc.) provision fresh Linux development environments on demand. Perfect for:
