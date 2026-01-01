@@ -16,7 +16,7 @@
 |----------|----------|----------------|--------|-------|
 | Proxmox | qm/pvesh CLI | SSH key | ✅ Implemented | Primary on-prem (v1.0) |
 | AWS | AWS CLI | IAM credentials/Key Pair | ✅ Implemented | Cloud option (v1.0) |
-| QEMU | virsh/libvirt | Local socket | ⏳ Planned | Local dev (v1.1) |
+| QEMU | virsh/libvirt | SSH + sudo | ✅ Implemented | Local/homelab (v1.0) |
 
 ## Target Operating Systems
 
@@ -149,7 +149,8 @@ To handle non-TTY SSH operations (MCP limitation), we use a three-level approach
 shared/
 ├── provision/          # VM creation (one per provider)
 │   ├── proxmox.sh      ✅ Proxmox: clone, configure, start, verify (408 lines)
-│   └── aws.sh          ✅ AWS EC2: provision, configure, wait SSH (405 lines)
+│   ├── aws.sh          ✅ AWS EC2: provision, configure, wait SSH (405 lines)
+│   └── qemu.sh         ✅ QEMU/libvirt: cloud-init, virt-install (400 lines)
 ├── bootstrap/          # OS setup (one per OS)
 │   └── ubuntu.sh       ✅ Ubuntu 24.04 essential packages + config (330 lines, ~2 min)
 ├── configure/          # Common configs (reusable)
@@ -199,9 +200,11 @@ AWS_SECURITY_GROUP=sg-xxx    # Optional
 
 **QEMU:**
 ```bash
-QEMU_URI=qemu:///system      # Optional
-QEMU_POOL=default            # Optional
-QEMU_NETWORK=default         # Optional
+QEMU_HOST=192.168.101.59     # Required - QEMU host IP/hostname
+QEMU_USER=username           # Required - SSH username for QEMU host
+QEMU_SUDO_PASS=password      # Required - Sudo password for QEMU host
+QEMU_POOL=default            # Optional - libvirt storage pool
+QEMU_NETWORK=default         # Optional - libvirt network name
 ```
 
 **VM Specification:**

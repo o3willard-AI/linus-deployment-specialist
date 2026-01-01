@@ -30,7 +30,7 @@ A tool where AI agents (Claude or Gemini) can:
 1. **VM Provisioning** ✅ **IMPLEMENTED**
    - ✅ Create VMs on Proxmox VE (full lifecycle)
    - ✅ AWS EC2 (full instance provisioning with auto-AMI detection)
-   - ⏳ QEMU (planned)
+   - ✅ QEMU/libvirt (cloud-init based provisioning)
    - ✅ Configure CPU, RAM, storage
    - ✅ Assign network/IP (QEMU agent + fallback nmap)
 
@@ -107,18 +107,17 @@ A tool where AI agents (Claude or Gemini) can:
 - ✅ Phase 1: MCP SSH Setup with ssh-mcp (completed 2025-12-28)
 - ✅ Phase 2: Proxmox Provisioning + Automation Strategy (completed 2025-12-29)
 - ✅ Phase 3: Agent Integration (completed 2025-12-29)
+- ✅ Phase 4: AWS EC2 Provider (completed 2025-12-30)
+- ✅ Phase 5: QEMU/libvirt Provider (completed 2025-12-31)
 
 **Current Phase:**
-- 🔄 Phase 4: Additional Providers (AWS - in progress)
+- 🔄 Phase 6: Documentation & v1.0 Release (in progress)
 
-**Remaining Phases:**
-- ⏳ Phase 5: QEMU Provider (optional)
-- ⏳ Phase 6: Local Dev UI (optional - can be deferred)
-
-**Progress: 25/44 milestones (56.8%)**
+**Progress: 31/48 milestones (64.6%)**
 
 **Key Architectural Decisions:**
 1. Using ssh-mcp v1.4.0 instead of @essential-mcp/server-enhanced-ssh (simpler, correct architecture)
 2. Implemented hybrid three-level automation strategy to solve interactive prompt problem
-3. Full deployment testing revealed 5 critical bugs - all fixed, Ubuntu + Proxmox validated production-ready
-4. AWS EC2 provider now implemented with auto-instance-type selection and AMI detection
+3. Full deployment testing revealed 5 critical bugs in Proxmox - all fixed, Ubuntu + Proxmox validated production-ready
+4. AWS EC2 provider implemented with auto-instance-type selection and AMI detection (2 bugs fixed)
+5. QEMU/libvirt provider implemented with cloud-init support (2 critical bugs fixed during testing)
