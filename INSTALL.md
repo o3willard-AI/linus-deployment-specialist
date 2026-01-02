@@ -6,6 +6,95 @@ This document provides explicit, sequential installation steps for AI agents to 
 
 ---
 
+## Platform Compatibility
+
+### Supported Platforms
+
+| Platform | Status | Requirements | Notes |
+|----------|--------|--------------|-------|
+| **Linux** (Ubuntu/Debian) | ✅ Fully Supported | bash, ssh, sshpass | Native support, all features work |
+| **Linux** (RHEL/Fedora/CentOS) | ✅ Fully Supported | bash, ssh, sshpass | Native support, all features work |
+| **macOS** | ✅ Supported | bash, ssh, Homebrew | Needs `brew install sshpass` for QEMU |
+| **Windows WSL** | ✅ Supported | WSL 2 with Ubuntu | Full Linux environment required |
+| **Windows Native** | ❌ Not Supported | N/A | Scripts require bash - use WSL instead |
+
+### Quick Platform Setup
+
+<details>
+<summary><b>Linux (Ubuntu/Debian)</b> - Click to expand</summary>
+
+**Status:** ✅ Works out of the box
+
+All required tools are available via apt:
+```bash
+sudo apt-get update
+sudo apt-get install -y bash openssh-client curl git sshpass
+```
+</details>
+
+<details>
+<summary><b>macOS</b> - Click to expand</summary>
+
+**Status:** ✅ Works with Homebrew
+
+Required tools:
+```bash
+# Install Homebrew if not present
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+# Install sshpass for QEMU provider (optional)
+brew install sshpass
+
+# Other tools (ssh, curl, bash) are pre-installed
+```
+
+**Note:** sshpass is only needed if you plan to use the QEMU/libvirt provider.
+</details>
+
+<details>
+<summary><b>Windows</b> - Click to expand</summary>
+
+**Status:** ⚠️ Requires WSL (Windows Subsystem for Linux)
+
+**Native Windows (PowerShell/cmd.exe) will NOT work** - bash scripts required.
+
+**Setup WSL:**
+```powershell
+# Run in PowerShell as Administrator
+wsl --install -d Ubuntu-24.04
+
+# Restart computer when prompted
+
+# After restart, open "Ubuntu" app and setup user account
+# Then inside WSL terminal:
+sudo apt-get update
+sudo apt-get install -y bash openssh-client curl git sshpass nodejs npm
+```
+
+**For AI Agents on Windows:**
+- Claude Code: Must be configured to use WSL terminal (not PowerShell)
+- Gemini: Must execute commands in WSL bash environment
+- All file paths should use Linux-style forward slashes
+</details>
+
+### AI Agent Platform Notes
+
+**Claude Code:**
+- **macOS:** ✅ Works natively in Terminal.app (bash/zsh)
+- **Linux:** ✅ Works natively in all terminals
+- **Windows:** ⚠️ Configure to use WSL terminal, not PowerShell
+
+**Gemini Code Assist:**
+- **macOS:** ✅ Works with bash environment
+- **Linux:** ✅ Works natively
+- **Windows:** ⚠️ Must use WSL bash
+
+**Cursor / Other AI IDEs:**
+- Same requirements as above - needs bash environment
+- Windows users must configure IDE to use WSL terminal
+
+---
+
 ## Installation Protocol
 
 ### Protocol Overview
@@ -33,14 +122,31 @@ OS_VERSION=$(uname -r)
 
 echo "Detected OS: $OS_TYPE $OS_VERSION"
 
+# Check if running in WSL
+if grep -qi microsoft /proc/version 2>/dev/null; then
+    echo "ℹ Running in Windows Subsystem for Linux (WSL)"
+    WSL_DETECTED=true
+else
+    WSL_DETECTED=false
+fi
+
 # Verify supported OS
 case "$OS_TYPE" in
-  Linux|Darwin)
-    echo "✓ OS supported"
+  Linux)
+    echo "✓ Linux OS detected"
+    if $WSL_DETECTED; then
+        echo "✓ WSL environment - compatible"
+    fi
+    ;;
+  Darwin)
+    echo "✓ macOS detected"
     ;;
   *)
     echo "✗ Unsupported OS: $OS_TYPE"
-    echo "REQUIRED: Linux or macOS"
+    echo "REQUIRED: Linux, macOS, or Windows with WSL"
+    echo ""
+    echo "Windows users: Install WSL with:"
+    echo "  wsl --install -d Ubuntu-24.04"
     exit 1
     ;;
 esac

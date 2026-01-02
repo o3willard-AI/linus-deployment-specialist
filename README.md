@@ -81,11 +81,37 @@ If you are a human wanting to use this tool:
 
 ## 🚀 Quick Start
 
+### Platform Requirements
+
+**Local Machine (where AI agent runs):**
+
+| Platform | Status | Setup Required |
+|----------|--------|----------------|
+| **Linux** | ✅ Fully Supported | Install: `bash`, `ssh`, `sshpass`, `nodejs` |
+| **macOS** | ✅ Supported | Install: `brew install sshpass` (for QEMU only) |
+| **Windows** | ⚠️ WSL Required | Must use WSL 2 with Ubuntu - **native Windows not supported** |
+
+<details>
+<summary><b>Why doesn't Windows work natively?</b></summary>
+
+All provisioning scripts use bash with Linux-specific features:
+- bash shebangs (`#!/usr/bin/env bash`)
+- bash-specific syntax (`set -euo pipefail`, process substitution, etc.)
+- Linux path separators (forward slashes)
+- SSH/SCP with Unix-style permissions
+
+**Solution:** Use WSL (Windows Subsystem for Linux) - provides full Ubuntu environment on Windows.
+
+**Setup:** `wsl --install -d Ubuntu-24.04` (PowerShell as Administrator)
+</details>
+
 ### Prerequisites
 
 - **Local Machine:**
   - Node.js 24.12+ (for MCP server)
-  - sshpass (for QEMU provider)
+  - bash 4.0+ (native on Linux/macOS, WSL on Windows)
+  - ssh/scp (openssh-client)
+  - sshpass (for QEMU provider only)
 
 - **For Proxmox:**
   - Proxmox VE 8.x with cloud-init template
@@ -101,28 +127,109 @@ If you are a human wanting to use this tool:
 
 ### Installation
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/yourusername/linusstr.git
-   cd linusstr
-   ```
+<details>
+<summary><b>Linux Installation</b></summary>
 
-2. **Install MCP SSH server:**
-   ```bash
-   npm install -g ssh-mcp
-   ```
+```bash
+# 1. Install dependencies
+sudo apt-get update
+sudo apt-get install -y bash openssh-client sshpass curl git
 
-3. **Configure Claude Code** (if using Claude):
-   ```bash
-   # Add to ~/.config/claude-code/mcp.json
-   {
-     "mcpServers": {
-       "ssh": {
-         "command": "ssh-mcp"
-       }
-     }
-   }
-   ```
+# 2. Install Node.js 24.x
+curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
+sudo apt-get install -y nodejs
+
+# 3. Clone repository
+git clone https://github.com/o3willard-AI/linus-deployment-specialist.git
+cd linus-deployment-specialist
+
+# 4. Install MCP server
+npm install -g ssh-mcp
+
+# 5. Configure Claude Code (if using)
+# Add to ~/.config/claude-code/mcp.json:
+# {
+#   "mcpServers": {
+#     "ssh": {
+#       "command": "ssh-mcp"
+#     }
+#   }
+# }
+```
+</details>
+
+<details>
+<summary><b>macOS Installation</b></summary>
+
+```bash
+# 1. Install Homebrew (if not already installed)
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+# 2. Install sshpass (optional, for QEMU provider only)
+brew install sshpass
+
+# 3. Install Node.js 24 (if not already installed)
+brew install node@24
+
+# 4. Clone repository
+git clone https://github.com/o3willard-AI/linus-deployment-specialist.git
+cd linus-deployment-specialist
+
+# 5. Install MCP server
+npm install -g ssh-mcp
+
+# 6. Configure Claude Code (if using)
+# Add to ~/.config/claude-code/mcp.json:
+# {
+#   "mcpServers": {
+#     "ssh": {
+#       "command": "ssh-mcp"
+#     }
+#   }
+# }
+```
+
+**Note:** bash and ssh are pre-installed on macOS.
+</details>
+
+<details>
+<summary><b>Windows Installation (via WSL)</b></summary>
+
+**Step 1: Install WSL (PowerShell as Administrator)**
+```powershell
+wsl --install -d Ubuntu-24.04
+# Restart computer when prompted
+```
+
+**Step 2: Setup inside WSL (open "Ubuntu" app)**
+```bash
+# 1. Update package lists
+sudo apt-get update
+
+# 2. Install dependencies
+sudo apt-get install -y bash openssh-client sshpass curl git
+
+# 3. Install Node.js 24.x
+curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
+sudo apt-get install -y nodejs
+
+# 4. Clone repository
+cd ~
+git clone https://github.com/o3willard-AI/linus-deployment-specialist.git
+cd linus-deployment-specialist
+
+# 5. Install MCP server
+npm install -g ssh-mcp
+
+# 6. Configure Claude Code to use WSL terminal
+# In Claude Code settings, set terminal to WSL bash
+```
+
+**Important for AI Agents on Windows:**
+- Claude Code must be configured to use WSL terminal (not PowerShell)
+- All commands must run in WSL bash environment
+- File paths use Linux format: `/home/user/project`
+</details>
 
 ---
 
