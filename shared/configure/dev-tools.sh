@@ -71,10 +71,14 @@ validate_environment() {
     fi
 
     source /etc/os-release
-    if [[ "${ID}" != "ubuntu" && "${ID}" != "debian" ]]; then
-        log_warn "This script is tested on Ubuntu/Debian (detected: ${ID})"
-    fi
-    log_info "Detected: ${PRETTY_NAME}"
+    case "${ID}" in
+        ubuntu|debian|almalinux|rocky|rhel|centos|fedora)
+            log_info "Detected: ${PRETTY_NAME}"
+            ;;
+        *)
+            log_warn "This script is tested on Ubuntu/Debian/AlmaLinux/Rocky (detected: ${ID})"
+            ;;
+    esac
 
     # Check required tools (from noninteractive.sh)
     check_dependencies curl wget || return 2
@@ -96,10 +100,29 @@ install_python() {
     log_step "2" "Installing Python ${PYTHON_VERSION}"
 
     # Install Python and pip using Level 2 wrapper
-    if ! pkg_install python${PYTHON_VERSION} python${PYTHON_VERSION}-pip python${PYTHON_VERSION}-venv; then
-        log_error "Failed to install Python"
-        return 6
-    fi
+    # Note: RHEL-based distros don't have separate python3-venv package
+    source /etc/os-release
+    case "${ID}" in
+        ubuntu|debian)
+            if ! pkg_install python${PYTHON_VERSION} python${PYTHON_VERSION}-pip python${PYTHON_VERSION}-venv; then
+                log_error "Failed to install Python"
+                return 6
+            fi
+            ;;
+        almalinux|rocky|rhel|centos|fedora)
+            if ! pkg_install python${PYTHON_VERSION} python${PYTHON_VERSION}-pip; then
+                log_error "Failed to install Python"
+                return 6
+            fi
+            ;;
+        *)
+            # Try generic python3 installation
+            if ! pkg_install python${PYTHON_VERSION}; then
+                log_error "Failed to install Python"
+                return 6
+            fi
+            ;;
+    esac
 
     # Verify installation
     if command -v python3 &>/dev/null; then
@@ -125,12 +148,27 @@ install_nodejs() {
 
     log_step "3" "Installing Node.js ${NODE_VERSION}"
 
-    # Add NodeSource repository
+    # Add NodeSource repository (different URLs for Debian vs RHEL)
     log_info "Adding NodeSource repository..."
 
     local setup_script="/tmp/nodesource_setup.sh"
+    local setup_url=""
 
-    if ! download_file "https://deb.nodesource.com/setup_${NODE_VERSION}.x" "${setup_script}"; then
+    source /etc/os-release
+    case "${ID}" in
+        ubuntu|debian)
+            setup_url="https://deb.nodesource.com/setup_${NODE_VERSION}.x"
+            ;;
+        almalinux|rocky|rhel|centos|fedora)
+            setup_url="https://rpm.nodesource.com/setup_${NODE_VERSION}.x"
+            ;;
+        *)
+            log_error "Unsupported OS for NodeSource: ${ID}"
+            return 6
+            ;;
+    esac
+
+    if ! download_file "${setup_url}" "${setup_script}"; then
         log_error "Failed to download NodeSource setup script"
         return 6
     fi
@@ -184,30 +222,53 @@ install_docker() {
 
     log_step "4" "Installing Docker"
 
-    # Install prerequisites
+    # Install prerequisites (distro-specific)
     log_info "Installing Docker prerequisites..."
-    if ! pkg_install ca-certificates gnupg lsb-release; then
-        log_error "Failed to install Docker prerequisites"
-        return 6
-    fi
 
-    # Add Docker GPG key
-    log_info "Adding Docker GPG key..."
-    mkdir -p /etc/apt/keyrings
-    if ! curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
-         gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null; then
-        log_error "Failed to add Docker GPG key"
-        return 6
-    fi
+    source /etc/os-release
+    case "${ID}" in
+        ubuntu|debian)
+            if ! pkg_install ca-certificates gnupg lsb-release; then
+                log_error "Failed to install Docker prerequisites"
+                return 6
+            fi
 
-    # Add Docker repository
-    log_info "Adding Docker repository..."
-    local arch=$(dpkg --print-architecture)
-    local codename=$(lsb_release -cs)
+            # Add Docker GPG key
+            log_info "Adding Docker GPG key..."
+            mkdir -p /etc/apt/keyrings
+            if ! curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+                 gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null; then
+                log_error "Failed to add Docker GPG key"
+                return 6
+            fi
 
-    echo \
-      "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-      ${codename} stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+            # Add Docker repository
+            log_info "Adding Docker repository..."
+            local arch=$(dpkg --print-architecture)
+            local codename=$(lsb_release -cs)
+
+            echo \
+              "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+              ${codename} stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+            ;;
+        almalinux|rocky|rhel|centos|fedora)
+            if ! pkg_install ca-certificates; then
+                log_error "Failed to install Docker prerequisites"
+                return 6
+            fi
+
+            # Add Docker repository using dnf config-manager
+            log_info "Adding Docker repository..."
+            if ! dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null; then
+                log_error "Failed to add Docker repository"
+                return 6
+            fi
+            ;;
+        *)
+            log_error "Unsupported OS for Docker installation: ${ID}"
+            return 6
+            ;;
+    esac
 
     # Update package cache
     if ! pkg_update; then

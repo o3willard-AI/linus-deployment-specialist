@@ -314,6 +314,11 @@ LINUS_VM_DISK:50
 
 ### Proxmox Provider
 - ✅ **Fixed (5 bugs):** apt-get logic, curl arguments, pkg_install errors
+- ⚠️ **v1.1 Known Issue:** AlmaLinux/Rocky cloud templates have cloud-init networking issues
+  - qemu-guest-agent not starting properly in cloud images
+  - Network configuration not applied via DHCP
+  - **Workaround needed:** Manual template configuration or alternative cloud images
+  - **Status:** Under investigation for v1.1.1
 
 ### AWS Provider
 - ✅ **Fixed (2 bugs):** Logging output, SSH key handling
@@ -351,8 +356,8 @@ MIT License - See [LICENSE](LICENSE) file for details
 
 ## 📊 Project Status
 
-**Version:** 1.0.0
-**Status:** Production Ready ✅
+**Version:** 1.1.0
+**Status:** Production Ready ✅ (Ubuntu), Experimental (AlmaLinux/Rocky)
 
 | Component | Status |
 |-----------|--------|
@@ -360,8 +365,8 @@ MIT License - See [LICENSE](LICENSE) file for details
 | AWS EC2 Provider | ✅ Fully tested |
 | QEMU/libvirt Provider | ✅ Fully tested |
 | Ubuntu 24.04 Bootstrap | ✅ Production ready |
-| AlmaLinux/Rocky Linux | ⏳ Planned for v1.1 |
-| Web UI | ⏳ Planned for v1.1 |
+| AlmaLinux/Rocky Linux | ⚠️ Code complete, template issues (v1.1) |
+| Web UI | ⏳ Planned for v1.2 |
 
 ---
 

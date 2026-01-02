@@ -37,47 +37,102 @@ readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Source libraries
 source "${SCRIPT_DIR}/../lib/logging.sh"
 source "${SCRIPT_DIR}/../lib/validation.sh"
+source "${SCRIPT_DIR}/../lib/noninteractive.sh"
 
 # Configuration from environment with defaults
 readonly INSTALL_BUILD_TOOLS="${INSTALL_BUILD_TOOLS:-true}"
 readonly INSTALL_NETWORK_TOOLS="${INSTALL_NETWORK_TOOLS:-true}"
 
-# Package lists
-readonly BUILD_PACKAGES=(
-    build-essential
-    make
-    cmake
-    gcc
-    g++
-    gdb
-    pkg-config
-)
+# Detect OS type for package selection
+detect_os_type() {
+    if [[ -f /etc/os-release ]]; then
+        source /etc/os-release
+        echo "${ID}"
+    else
+        echo "unknown"
+    fi
+}
 
-readonly SSL_PACKAGES=(
-    openssl
-    ca-certificates
-    libssl-dev
-)
+OS_TYPE=$(detect_os_type)
 
-readonly NETWORK_PACKAGES=(
-    net-tools
-    iputils-ping
-    dnsutils
-    netcat-openbsd
-    traceroute
-    nmap
-)
-
-readonly UTILITY_PACKAGES=(
-    jq
-    unzip
-    zip
-    tar
-    rsync
-    less
-    which
-    file
-)
+# Package lists (distro-aware)
+case "${OS_TYPE}" in
+    ubuntu|debian)
+        BUILD_PACKAGES=(
+            build-essential
+            make
+            cmake
+            gcc
+            g++
+            gdb
+            pkg-config
+        )
+        SSL_PACKAGES=(
+            openssl
+            ca-certificates
+            libssl-dev
+        )
+        NETWORK_PACKAGES=(
+            net-tools
+            iputils-ping
+            dnsutils
+            netcat-openbsd
+            traceroute
+            nmap
+        )
+        UTILITY_PACKAGES=(
+            jq
+            unzip
+            zip
+            tar
+            rsync
+            less
+            which
+            file
+        )
+        ;;
+    almalinux|rocky|rhel|centos|fedora)
+        BUILD_PACKAGES=(
+            "@Development Tools"
+            make
+            cmake
+            gcc
+            gcc-c++
+            gdb
+            pkgconfig
+        )
+        SSL_PACKAGES=(
+            openssl
+            ca-certificates
+            openssl-devel
+        )
+        NETWORK_PACKAGES=(
+            net-tools
+            iputils
+            bind-utils
+            nmap-ncat
+            traceroute
+            nmap
+        )
+        UTILITY_PACKAGES=(
+            jq
+            unzip
+            zip
+            tar
+            rsync
+            less
+            which
+            file
+        )
+        ;;
+    *)
+        # Fallback to basic packages that should work everywhere
+        BUILD_PACKAGES=(make gcc)
+        SSL_PACKAGES=(openssl)
+        NETWORK_PACKAGES=(net-tools)
+        UTILITY_PACKAGES=(tar rsync less which)
+        ;;
+esac
 
 # -----------------------------------------------------------------------------
 # Function: validate_environment
@@ -86,20 +141,27 @@ readonly UTILITY_PACKAGES=(
 validate_environment() {
     log_step "1" "Validating environment"
 
-    # Check we're on Ubuntu/Debian
+    # Check OS detection
     if [[ ! -f /etc/os-release ]]; then
         log_error "Cannot detect OS - /etc/os-release not found"
         return 2
     fi
 
     source /etc/os-release
-    if [[ "${ID}" != "ubuntu" && "${ID}" != "debian" ]]; then
-        log_warn "This script is tested on Ubuntu/Debian (detected: ${ID})"
-    fi
-    log_info "Detected: ${PRETTY_NAME}"
+    case "${ID}" in
+        ubuntu|debian|almalinux|rocky|rhel|centos|fedora)
+            log_info "Detected: ${PRETTY_NAME}"
+            ;;
+        *)
+            log_warn "This script is tested on Ubuntu/Debian/AlmaLinux/Rocky (detected: ${ID})"
+            ;;
+    esac
 
-    # Check required tools
-    check_dependencies apt-get || return 2
+    # Check package manager is available
+    if ! command -v apt-get &>/dev/null && ! command -v dnf &>/dev/null && ! command -v yum &>/dev/null; then
+        log_error "No supported package manager found (apt-get, dnf, yum)"
+        return 2
+    fi
 
     log_success "Environment validation passed"
     return 0
@@ -117,13 +179,7 @@ install_build_tools() {
 
     log_step "2" "Installing build tools"
 
-    export DEBIAN_FRONTEND=noninteractive
-
-    local packages="${BUILD_PACKAGES[*]}"
-
-    log_info "Installing: ${packages}"
-
-    if ! apt-get install -y -qq ${packages} 2>&1 | grep -v "^$"; then
+    if ! pkg_install "${BUILD_PACKAGES[@]}"; then
         log_error "Failed to install build tools"
         return 6
     fi
@@ -139,13 +195,7 @@ install_build_tools() {
 install_ssl_packages() {
     log_step "3" "Installing SSL/crypto packages"
 
-    export DEBIAN_FRONTEND=noninteractive
-
-    local packages="${SSL_PACKAGES[*]}"
-
-    log_info "Installing: ${packages}"
-
-    if ! apt-get install -y -qq ${packages} 2>&1 | grep -v "^$"; then
+    if ! pkg_install "${SSL_PACKAGES[@]}"; then
         log_error "Failed to install SSL packages"
         return 6
     fi
@@ -166,13 +216,7 @@ install_network_tools() {
 
     log_step "4" "Installing network tools"
 
-    export DEBIAN_FRONTEND=noninteractive
-
-    local packages="${NETWORK_PACKAGES[*]}"
-
-    log_info "Installing: ${packages}"
-
-    if ! apt-get install -y -qq ${packages} 2>&1 | grep -v "^$"; then
+    if ! pkg_install "${NETWORK_PACKAGES[@]}"; then
         log_warn "Failed to install some network tools (non-fatal)"
     else
         log_success "Network tools installed"
@@ -188,13 +232,7 @@ install_network_tools() {
 install_utility_packages() {
     log_step "5" "Installing utility packages"
 
-    export DEBIAN_FRONTEND=noninteractive
-
-    local packages="${UTILITY_PACKAGES[*]}"
-
-    log_info "Installing: ${packages}"
-
-    if ! apt-get install -y -qq ${packages} 2>&1 | grep -v "^$"; then
+    if ! pkg_install "${UTILITY_PACKAGES[@]}"; then
         log_error "Failed to install utility packages"
         return 6
     fi

@@ -50,6 +50,7 @@ readonly PROXMOX_NODE="${PROXMOX_NODE:-moxy}"
 readonly PROXMOX_STORAGE="${PROXMOX_STORAGE:-local-lvm}"
 readonly PROXMOX_BRIDGE="${PROXMOX_BRIDGE:-vmbr0}"
 readonly VM_TEMPLATE_ID="${VM_TEMPLATE_ID:-9000}"
+readonly VM_OS_TYPE="${VM_OS_TYPE:-ubuntu}"
 
 readonly VM_NAME="${VM_NAME:-}"
 readonly VM_CPU="${VM_CPU:-2}"
@@ -59,7 +60,22 @@ readonly VM_DISK="${VM_DISK:-20}"
 # Global variables (set by functions)
 ALLOCATED_VM_ID=""
 VM_IP=""
-VM_SSH_USER="ubuntu"
+
+# Set SSH user based on OS type
+case "${VM_OS_TYPE}" in
+    ubuntu)
+        VM_SSH_USER="ubuntu"
+        ;;
+    almalinux)
+        VM_SSH_USER="almalinux"
+        ;;
+    rocky)
+        VM_SSH_USER="rocky"
+        ;;
+    *)
+        VM_SSH_USER="cloud-user"
+        ;;
+esac
 
 # -----------------------------------------------------------------------------
 # Function: validate_environment
@@ -107,6 +123,9 @@ validate_environment() {
         return 3
     fi
     log_info "Template: VM ${VM_TEMPLATE_ID} OK"
+
+    # Validate OS type
+    validate_os "${VM_OS_TYPE}" || return 3
 
     # Validate VM specification
     validate_positive_int "$VM_CPU" "CPU cores" || return 1
@@ -353,7 +372,8 @@ output_result() {
         "VM_CPU:${VM_CPU}" \
         "VM_RAM:${VM_RAM}" \
         "VM_DISK:${VM_DISK}" \
-        "VM_NODE:${PROXMOX_NODE}"
+        "VM_NODE:${PROXMOX_NODE}" \
+        "VM_OS_TYPE:${VM_OS_TYPE}"
 }
 
 # -----------------------------------------------------------------------------
