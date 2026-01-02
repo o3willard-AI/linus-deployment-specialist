@@ -91,6 +91,15 @@ If you are a human wanting to use this tool:
 | **macOS** | ✅ Supported | Install: `brew install sshpass` (for QEMU only) |
 | **Windows** | ⚠️ WSL Required | Must use WSL 2 with Ubuntu - **native Windows not supported** |
 
+### AI Agent Compatibility
+
+| AI Agent | Linux | macOS | Windows |
+|----------|-------|-------|---------|
+| **Claude Code** | ✅ Native | ✅ Native | ⚠️ Needs WSL terminal |
+| **GitHub Copilot** | ✅ Native | ✅ Native | ⚠️ VS Code terminal → WSL |
+| **Gemini Code Assist** | ✅ Native | ✅ Native | ⚠️ Needs WSL terminal |
+| **Cursor** | ✅ Native | ✅ Native | ⚠️ Needs WSL terminal |
+
 <details>
 <summary><b>Why doesn't Windows work natively?</b></summary>
 
@@ -229,6 +238,241 @@ npm install -g ssh-mcp
 - Claude Code must be configured to use WSL terminal (not PowerShell)
 - All commands must run in WSL bash environment
 - File paths use Linux format: `/home/user/project`
+</details>
+
+---
+
+## 🤖 GitHub Copilot Setup (Windows Users)
+
+**If you're using GitHub Copilot in VS Code on Windows, follow these steps:**
+
+### Critical Requirement
+VS Code's integrated terminal MUST use WSL bash, not PowerShell or cmd.exe. Our scripts use bash syntax and will fail in PowerShell.
+
+<details>
+<summary><b>For Copilot Agent: Automated Configuration</b></summary>
+
+**Copilot should execute these commands to verify/configure the environment:**
+
+```bash
+# Step 1: Verify WSL is installed
+wsl --status
+
+# If WSL not installed, install it (requires admin PowerShell):
+# wsl --install -d Ubuntu-24.04
+# (System will require restart)
+
+# Step 2: Check VS Code terminal configuration
+code --version
+
+# Step 3: Verify current shell in VS Code terminal
+echo $SHELL
+# Expected output: /bin/bash (WSL) or /bin/zsh (macOS)
+# If output is blank or shows PowerShell path, terminal needs reconfiguration
+
+# Step 4: Quick bash compatibility test
+bash -c 'set -euo pipefail && echo "✓ Bash environment compatible"'
+# Expected output: ✓ Bash environment compatible
+# If error: Terminal is not using bash
+```
+
+**If tests fail, inform user to follow manual configuration steps below.**
+</details>
+
+<details>
+<summary><b>For Users: Manual VS Code Terminal Configuration</b></summary>
+
+**Step-by-step instructions to configure VS Code terminal for WSL:**
+
+### Prerequisites Check
+1. Open PowerShell as Administrator
+2. Run: `wsl --status`
+3. If error "WSL is not installed":
+   ```powershell
+   wsl --install -d Ubuntu-24.04
+   ```
+4. **Restart your computer** when prompted
+5. After restart, open "Ubuntu" app and create username/password
+
+### Configure VS Code Terminal (Method 1: Settings UI)
+
+1. **Open VS Code**
+2. Press `Ctrl + ,` (or File → Preferences → Settings)
+3. Search for: `terminal.integrated.defaultProfile.windows`
+4. Click dropdown and select: **Ubuntu (WSL)**
+5. Close and reopen VS Code
+6. Open new terminal: `Ctrl + `` ` (backtick)
+7. Terminal prompt should show: `username@COMPUTERNAME:~$`
+
+### Configure VS Code Terminal (Method 2: Command Palette)
+
+1. **Open VS Code**
+2. Press `Ctrl + Shift + P`
+3. Type: `Terminal: Select Default Profile`
+4. Select: **Ubuntu (WSL)**
+5. Close current terminal (`Ctrl + Shift + `` ` then click trash icon)
+6. Open new terminal: `Ctrl + `` `
+7. Verify bash prompt appears
+
+### Configure VS Code Terminal (Method 3: settings.json)
+
+1. **Open VS Code**
+2. Press `Ctrl + Shift + P`
+3. Type: `Preferences: Open User Settings (JSON)`
+4. Add this line:
+   ```json
+   {
+     "terminal.integrated.defaultProfile.windows": "Ubuntu (WSL)"
+   }
+   ```
+5. Save file (`Ctrl + S`)
+6. Restart VS Code
+
+### Verification
+
+Open VS Code terminal and run:
+```bash
+# Should show /bin/bash (WSL) or /usr/bin/bash
+echo $SHELL
+
+# Should show your username@hostname
+whoami
+
+# Should output: ✓ Bash environment compatible
+bash -c 'set -euo pipefail && echo "✓ Bash environment compatible"'
+
+# Should show Ubuntu version
+cat /etc/os-release | grep PRETTY_NAME
+```
+
+**All commands successful?** ✅ You're ready to use Linus!
+
+**Any commands failed?** ⚠️ See troubleshooting below.
+</details>
+
+<details>
+<summary><b>Troubleshooting: Common Copilot Issues on Windows</b></summary>
+
+### Issue 1: "bash: command not found"
+
+**Symptoms:**
+- VS Code terminal shows `PS C:\Users\...>` (PowerShell)
+- Running `bash` shows error
+
+**Fix:**
+1. WSL not installed → Run `wsl --install -d Ubuntu-24.04` in admin PowerShell
+2. VS Code terminal not configured → Follow manual configuration steps above
+3. Restart VS Code after configuration changes
+
+---
+
+### Issue 2: "wsl: command not found"
+
+**Symptoms:**
+- `wsl --status` shows error in PowerShell
+
+**Fix:**
+1. Windows version too old (need Windows 10 version 2004+ or Windows 11)
+2. WSL feature not enabled:
+   ```powershell
+   # Run as Administrator
+   dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart
+   dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
+   # Restart computer
+   wsl --set-default-version 2
+   wsl --install -d Ubuntu-24.04
+   ```
+
+---
+
+### Issue 3: Scripts fail with "permission denied"
+
+**Symptoms:**
+- `./shared/provision/proxmox.sh: Permission denied`
+
+**Fix:**
+```bash
+# In WSL terminal, navigate to project directory:
+cd ~/linus-deployment-specialist
+
+# Make scripts executable:
+chmod +x shared/provision/*.sh
+chmod +x shared/bootstrap/*.sh
+chmod +x shared/configure/*.sh
+
+# Verify:
+ls -l shared/provision/proxmox.sh
+# Should show: -rwxr-xr-x (x = executable)
+```
+
+---
+
+### Issue 4: "No such file or directory" errors
+
+**Symptoms:**
+- Scripts can't find files that exist in Windows
+
+**Fix:**
+- File is in Windows filesystem (`C:\Users\...`)
+- Must clone repository in WSL filesystem:
+  ```bash
+  # WRONG - In Windows filesystem:
+  cd /mnt/c/Users/YourName/Projects
+  git clone ...
+
+  # CORRECT - In WSL filesystem:
+  cd ~
+  git clone https://github.com/o3willard-AI/linus-deployment-specialist.git
+  cd linus-deployment-specialist
+  ```
+
+---
+
+### Issue 5: Copilot suggests PowerShell commands
+
+**Symptoms:**
+- Copilot generates `Get-ChildItem`, `Set-Location`, etc.
+- Commands don't work in bash
+
+**Fix:**
+1. Explicitly tell Copilot: "Use bash commands only"
+2. Verify terminal shows bash prompt (`$` not `>`)
+3. Ask Copilot: "Convert this to bash syntax"
+
+---
+
+### Issue 6: Line ending errors (`\r` command not found)
+
+**Symptoms:**
+- Error: `$'\r': command not found`
+- Scripts have Windows line endings (CRLF)
+
+**Fix:**
+```bash
+# Convert line endings from CRLF to LF:
+sudo apt-get install dos2unix
+find shared -name "*.sh" -exec dos2unix {} \;
+
+# Or configure Git to handle line endings:
+git config --global core.autocrlf input
+git config --global core.eol lf
+
+# Re-clone repository:
+cd ~
+rm -rf linus-deployment-specialist
+git clone https://github.com/o3willard-AI/linus-deployment-specialist.git
+```
+
+---
+
+### Still Having Issues?
+
+1. **Restart VS Code** - Configuration changes sometimes need restart
+2. **Check WSL status**: `wsl --status` in PowerShell
+3. **Check VS Code settings**: Search for "terminal.integrated.defaultProfile.windows"
+4. **Test in standalone WSL**: Open "Ubuntu" app and try commands there
+5. **File an issue**: https://github.com/o3willard-AI/linus-deployment-specialist/issues
+
 </details>
 
 ---

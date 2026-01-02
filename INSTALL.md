@@ -84,6 +84,14 @@ sudo apt-get install -y bash openssh-client curl git sshpass nodejs npm
 - **Linux:** ✅ Works natively in all terminals
 - **Windows:** ⚠️ Configure to use WSL terminal, not PowerShell
 
+**GitHub Copilot (VS Code):**
+- **macOS:** ✅ Works natively with default terminal
+- **Linux:** ✅ Works natively with default terminal
+- **Windows:** ⚠️ **CRITICAL** - VS Code terminal MUST be configured to WSL
+  - Default PowerShell terminal will FAIL
+  - See detailed Copilot configuration section below
+  - Agent verification commands provided
+
 **Gemini Code Assist:**
 - **macOS:** ✅ Works with bash environment
 - **Linux:** ✅ Works natively
@@ -92,6 +100,300 @@ sudo apt-get install -y bash openssh-client curl git sshpass nodejs npm
 **Cursor / Other AI IDEs:**
 - Same requirements as above - needs bash environment
 - Windows users must configure IDE to use WSL terminal
+
+---
+
+## GitHub Copilot Configuration for Windows
+
+**IMPORTANT:** If using GitHub Copilot in VS Code on Windows, the terminal configuration is critical. This section provides commands for Copilot to execute AND manual steps for users.
+
+### For Copilot Agent: Environment Verification Protocol
+
+**Execute these commands in order. If any fail, direct user to manual configuration.**
+
+```bash
+# ============================================================================
+# COPILOT AGENT VERIFICATION PROTOCOL
+# ============================================================================
+
+# Step 1: Detect operating system
+OS_TYPE=$(uname -s 2>/dev/null || echo "UNKNOWN")
+echo "Detected OS: $OS_TYPE"
+
+# Step 2: If Windows (via WSL), verify we're in WSL environment
+if [[ -f /proc/version ]]; then
+    if grep -qi microsoft /proc/version; then
+        echo "✓ Running in WSL environment"
+        WSL_DETECTED=true
+    else
+        echo "✓ Running in native Linux"
+        WSL_DETECTED=false
+    fi
+else
+    WSL_DETECTED=false
+fi
+
+# Step 3: Verify bash is available and version is 4.0+
+BASH_VERSION=$(bash --version | head -1 | grep -oP '\d+\.\d+' | head -1)
+BASH_MAJOR=$(echo $BASH_VERSION | cut -d. -f1)
+if [ "$BASH_MAJOR" -ge 4 ]; then
+    echo "✓ Bash $BASH_VERSION (compatible)"
+else
+    echo "✗ Bash $BASH_VERSION (need 4.0+)"
+    echo "ACTION REQUIRED: User must upgrade bash"
+    exit 1
+fi
+
+# Step 4: Verify current shell
+CURRENT_SHELL=$(echo $SHELL)
+if [[ "$CURRENT_SHELL" == *"bash"* ]] || [[ "$CURRENT_SHELL" == *"zsh"* ]]; then
+    echo "✓ Shell: $CURRENT_SHELL (compatible)"
+else
+    echo "✗ Shell: $CURRENT_SHELL (incompatible)"
+    echo "ACTION REQUIRED: User must configure VS Code terminal to WSL"
+    exit 1
+fi
+
+# Step 5: Test bash compatibility
+if bash -c 'set -euo pipefail && echo "test"' &>/dev/null; then
+    echo "✓ Bash compatibility test passed"
+else
+    echo "✗ Bash compatibility test failed"
+    echo "ACTION REQUIRED: Terminal is not using bash"
+    exit 1
+fi
+
+# Step 6: Verify required tools
+MISSING_TOOLS=()
+command -v ssh &>/dev/null || MISSING_TOOLS+=("ssh")
+command -v git &>/dev/null || MISSING_TOOLS+=("git")
+command -v curl &>/dev/null || MISSING_TOOLS+=("curl")
+
+if [ ${#MISSING_TOOLS[@]} -eq 0 ]; then
+    echo "✓ All required tools present"
+else
+    echo "✗ Missing tools: ${MISSING_TOOLS[@]}"
+    echo "ACTION REQUIRED: User must install missing tools"
+    exit 1
+fi
+
+# Step 7: Check if project is in WSL filesystem (if WSL detected)
+if $WSL_DETECTED; then
+    CURRENT_PATH=$(pwd)
+    if [[ "$CURRENT_PATH" == /mnt/c/* ]] || [[ "$CURRENT_PATH" == /mnt/* ]]; then
+        echo "⚠ WARNING: Project in Windows filesystem ($CURRENT_PATH)"
+        echo "RECOMMENDATION: Clone project in WSL filesystem (~/)"
+        echo "This may cause performance issues and file permission problems"
+    else
+        echo "✓ Project in WSL filesystem ($CURRENT_PATH)"
+    fi
+fi
+
+echo "========================================="
+echo "✓ ENVIRONMENT VERIFICATION COMPLETE"
+echo "========================================="
+```
+
+**If verification passes:** ✅ Proceed with installation
+
+**If verification fails:** ❌ Direct user to manual configuration steps below
+
+### For Users: Manual VS Code Terminal Configuration
+
+<details>
+<summary><b>Method 1: VS Code Settings UI (Recommended for beginners)</b></summary>
+
+**Step-by-step with screenshots descriptions:**
+
+1. **Open VS Code Settings**
+   - Click gear icon (⚙️) in bottom-left corner
+   - Select "Settings"
+   - OR press `Ctrl + ,`
+
+2. **Search for terminal settings**
+   - In search box at top, type: `terminal.integrated.defaultProfile.windows`
+   - Setting should appear: "Terminal > Integrated > Default Profile: Windows"
+
+3. **Change default profile**
+   - Click the dropdown menu
+   - Select: **Ubuntu (WSL)**
+   - If "Ubuntu (WSL)" not visible:
+     - WSL not installed → See "Install WSL" section below
+     - Restart VS Code after WSL installation
+
+4. **Apply changes**
+   - Close all open terminals in VS Code
+   - Click trash icon on terminal tabs to close them
+   - Open new terminal: `Ctrl + `` ` (backtick key, below Esc)
+
+5. **Verify configuration**
+   - Terminal prompt should show: `username@COMPUTERNAME:~$`
+   - NOT `PS C:\Users\...>` (that's PowerShell)
+   - Run: `echo $SHELL` → should output `/bin/bash` or `/usr/bin/bash`
+
+</details>
+
+<details>
+<summary><b>Method 2: VS Code Command Palette (Faster)</b></summary>
+
+**Quick configuration via command palette:**
+
+1. **Open Command Palette**
+   - Press `Ctrl + Shift + P`
+   - OR click View → Command Palette
+
+2. **Select terminal profile**
+   - Type: `Terminal: Select Default Profile`
+   - Press Enter
+   - Select: **Ubuntu (WSL)** from dropdown
+
+3. **Restart terminal**
+   - Close current terminal (click trash icon)
+   - Open new terminal: `Ctrl + `` `
+   - Verify bash prompt appears: `username@COMPUTERNAME:~$`
+
+4. **Test environment**
+   ```bash
+   echo $SHELL
+   # Output: /bin/bash or /usr/bin/bash
+
+   bash -c 'set -euo pipefail && echo "✓ Compatible"'
+   # Output: ✓ Compatible
+   ```
+
+</details>
+
+<details>
+<summary><b>Method 3: settings.json (For advanced users)</b></summary>
+
+**Direct JSON configuration:**
+
+1. **Open settings.json**
+   - Press `Ctrl + Shift + P`
+   - Type: `Preferences: Open User Settings (JSON)`
+   - Press Enter
+
+2. **Add terminal configuration**
+   ```json
+   {
+     "terminal.integrated.defaultProfile.windows": "Ubuntu (WSL)",
+     "terminal.integrated.profiles.windows": {
+       "Ubuntu (WSL)": {
+         "path": "C:\\Windows\\System32\\wsl.exe",
+         "args": ["-d", "Ubuntu-24.04"]
+       }
+     }
+   }
+   ```
+
+3. **Save and restart**
+   - Save file: `Ctrl + S`
+   - Close VS Code completely
+   - Reopen VS Code
+   - Open terminal: `Ctrl + `` `
+
+4. **Verify**
+   ```bash
+   whoami  # Should show WSL username
+   pwd     # Should show /home/username or similar
+   ```
+
+</details>
+
+### Install WSL (If Not Already Installed)
+
+<details>
+<summary><b>WSL Installation Steps</b></summary>
+
+**Prerequisites:**
+- Windows 10 version 2004+ (Build 19041+) OR Windows 11
+- Administrator access
+
+**Installation:**
+
+1. **Open PowerShell as Administrator**
+   - Press `Windows key`
+   - Type: `PowerShell`
+   - Right-click "Windows PowerShell"
+   - Select "Run as administrator"
+
+2. **Install WSL**
+   ```powershell
+   wsl --install -d Ubuntu-24.04
+   ```
+
+   Expected output:
+   ```
+   Installing: Windows Subsystem for Linux
+   Installing: Virtual Machine Platform
+   Installing: Ubuntu 24.04 LTS
+   ```
+
+3. **Restart computer**
+   - When prompted, restart your computer
+   - **This is required** - WSL won't work until restart
+
+4. **Setup Ubuntu**
+   - After restart, "Ubuntu" app will open automatically
+   - Create username (lowercase, no spaces)
+   - Create password (you'll need this for `sudo`)
+   - Wait for "Installation successful" message
+
+5. **Verify installation**
+   ```powershell
+   # In PowerShell:
+   wsl --status
+   # Should show: Default Version: 2
+
+   wsl --list --verbose
+   # Should show: Ubuntu-24.04    Running    2
+   ```
+
+6. **Return to VS Code configuration**
+   - Now follow "Method 1" or "Method 2" above
+   - "Ubuntu (WSL)" should now appear in dropdown
+
+</details>
+
+### Verification Commands
+
+**After configuration, run these in VS Code terminal:**
+
+```bash
+# Test 1: Check shell
+echo $SHELL
+# Expected: /bin/bash or /usr/bin/bash
+# NOT: blank or PowerShell path
+
+# Test 2: Check user
+whoami
+# Expected: Your WSL username
+# NOT: Your Windows username
+
+# Test 3: Check OS
+cat /etc/os-release | grep PRETTY_NAME
+# Expected: Ubuntu 24.04 LTS or similar
+# NOT: Error or Windows info
+
+# Test 4: Bash compatibility
+bash -c 'set -euo pipefail && echo "✓ Bash works"'
+# Expected: ✓ Bash works
+# NOT: Error message
+
+# Test 5: Required tools
+command -v ssh && command -v git && command -v curl && echo "✓ Tools installed"
+# Expected: ✓ Tools installed
+# NOT: command not found
+
+# Test 6: File location
+pwd | grep -E "^/home|^/root" && echo "✓ In WSL filesystem"
+# Expected: ✓ In WSL filesystem
+# If error: You're in Windows filesystem (/mnt/c/...)
+```
+
+**All tests pass?** ✅ VS Code is correctly configured for Linus
+
+**Any test fails?** ⚠️ See troubleshooting section in README.md
 
 ---
 
