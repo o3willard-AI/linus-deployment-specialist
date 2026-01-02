@@ -4,9 +4,10 @@
 
 An infrastructure automation tool that enables AI agents to create, configure, and manage disposable Linux VMs across multiple providers (Proxmox, AWS EC2, QEMU/libvirt).
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/yourusername/linusstr)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/o3willard-AI/linus-deployment-specialist/releases)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Providers](https://img.shields.io/badge/providers-3-success.svg)](README.md#supported-providers)
+[![GitHub](https://img.shields.io/badge/GitHub-o3willard--AI%2Flinus--deployment--specialist-blue.svg)](https://github.com/o3willard-AI/linus-deployment-specialist)
 
 ---
 
