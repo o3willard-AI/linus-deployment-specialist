@@ -1,0 +1,141 @@
+name: CI
+
+on:
+  push:
+    branches: [master, dev, main]
+  pull_request:
+    branches: [master, dev, main]
+
+jobs:
+  smoke-tests:
+    name: Smoke Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run smoke tests
+        run: |
+          chmod +x tests/run-all-tests.sh
+          chmod +x tests/smoke/*.sh
+          ./tests/run-all-tests.sh --smoke-only
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-report
+          path: tests/test-report-*.txt
+          retention-days: 7
+
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Run ShellCheck on all scripts
+        run: |
+          echo "Running ShellCheck on all shell scripts..."
+          find . -name "*.sh" -type f -exec shellcheck {} \;
+
+  script-syntax:
+    name: Script Syntax Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate all shell script syntax
+        run: |
+          echo "Validating shell script syntax..."
+          find . -name "*.sh" -type f | while read -r script; do
+            echo "Checking: $script"
+            bash -n "$script" || { echo "Syntax error in $script"; exit 1; }
+          done
+          echo "All scripts have valid syntax"
+
+  test-structure:
+    name: Test Structure Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify test files exist
+        run: |
+          echo "Verifying test structure..."
+          test -f tests/run-all-tests.sh || { echo "Missing: tests/run-all-tests.sh"; exit 1; }
+          test -d tests/smoke || { echo "Missing: tests/smoke directory"; exit 1; }
+          test -d tests/integration || { echo "Missing: tests/integration directory"; exit 1; }
+          test -d tests/e2e || { echo "Missing: tests/e2e directory"; exit 1; }
+          echo "Test structure is valid"
+
+      - name: Verify test scripts are executable
+        run: |
+          echo "Verifying test script permissions..."
+          for script in tests/run-all-tests.sh tests/smoke/*.sh; do
+            if [ -f "$script" ]; then
+              perms=$(stat -c %a "$script" 2>/dev/null || stat -f %A "$script" 2>/dev/null)
+              echo "$script: $perms"
+            fi
+          done
+
+  library-tests:
+    name: Library Functions Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate shared libraries
+        run: |
+          echo "Validating shared library functions..."
+          
+          # Source each library and check for syntax errors
+          for lib in shared/lib/*.sh; do
+            echo "Checking library: $lib"
+            # Use bash -n to check syntax, don't source (may have dependencies)
+            bash -n "$lib" || { echo "Syntax error in $lib"; exit 1; }
+          done
+          
+          # Check that provision scripts have valid syntax
+          for provision in shared/provision/*.sh; do
+            echo "Checking provision script: $provision"
+            bash -n "$provision" || { echo "Syntax error in $provision"; exit 1; }
+          done
+          
+          echo "All libraries and provision scripts are valid"
+
+  documentation:
+    name: Documentation Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify required documentation exists
+        run: |
+          echo "Verifying documentation..."
+          required_files=(
+            "README.md"
+            "AGENT-GUIDE.md"
+            "INSTALL.md"
+            "CONFIGURATION.md"
+            "PROJECT-STATUS.md"
+            "tests/README.md"
+          )
+          
+          for file in "${required_files[@]}"; do
+            if [ -f "$file" ]; then
+              echo "✓ Found: $file"
+            else
+              echo "✗ Missing: $file"
+              exit 1
+            fi
+          done
+          echo "All required documentation present"

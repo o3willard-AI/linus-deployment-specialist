@@ -24,6 +24,8 @@ echo ""
 # All scripts to test
 scripts=(
     "shared/provision/proxmox.sh"
+    "shared/provision/aws.sh"
+    "shared/provision/qemu.sh"
     "shared/bootstrap/ubuntu.sh"
     "shared/configure/dev-tools.sh"
     "shared/configure/base-packages.sh"
@@ -48,11 +50,11 @@ for script in "${scripts[@]}"; do
 
     if bash -n "$script" 2>/dev/null; then
         echo -e "${GREEN}✅${NC} $script"
-        ((passed++))
+        passed=$((passed + 1))
     else
         echo -e "${RED}❌${NC} $script - SYNTAX ERROR"
         bash -n "$script" 2>&1 | sed 's/^/    /'
-        ((failed++))
+        failed=$((failed + 1))
     fi
 done
 
