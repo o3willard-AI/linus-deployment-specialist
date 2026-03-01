@@ -46,13 +46,20 @@ if [[ "$#" -gt 0 ]]; then
                 echo "Options:"
                 echo "  --smoke-only        Run only smoke tests (fast, no VM required)"
                 echo "  --integration-only  Run only integration tests (requires live VM)"
-                echo "  --e2e-only          Run only E2E tests (requires Proxmox access)"
+                echo "  --e2e-only          Run only E2E tests (requires infrastructure access)"
                 echo "  (no options)        Run all tests in sequence"
                 echo ""
                 echo "Environment Variables:"
                 echo "  TEST_VM_IP          IP of test VM for integration tests (default: 192.168.101.113)"
                 echo "  TEST_VM_USER        SSH user for test VM (default: ubuntu)"
                 echo "  PROXMOX_HOST        Proxmox host for E2E tests (default: 192.168.101.155)"
+                echo "  AWS_ACCESS_KEY_ID   AWS access key for E2E tests"
+                echo "  AWS_SECRET_ACCESS_KEY AWS secret key for E2E tests"
+                echo "  AWS_REGION          AWS region for E2E tests"
+                echo "  QEMU_HOST           QEMU host for E2E tests"
+                echo "  QEMU_USER           QEMU SSH user for E2E tests"
+                echo ""
+                echo "See tests/E2E-CREDENTIALS.md for full credential guide."
                 echo ""
                 exit 0
                 ;;
@@ -91,10 +98,10 @@ if [[ "$RUN_SMOKE" == "true" ]]; then
     echo ""
 
     if bash tests/smoke/test-all-scripts.sh; then
-        ((TESTS_PASSED++))
+        TESTS_PASSED=$((TESTS_PASSED + 1))
         echo ""
     else
-        ((TESTS_FAILED++))
+        TESTS_FAILED=$((TESTS_FAILED + 1))
         echo ""
         echo -e "${RED}❌ Smoke tests failed - aborting remaining tests${NC}"
         exit 1
@@ -117,47 +124,81 @@ if [[ "$RUN_INTEGRATION" == "true" ]]; then
     # Test 1: Bootstrap Ubuntu
     echo -e "${YELLOW}Integration Test 1/2: Ubuntu Bootstrap${NC}"
     if bash tests/integration/test-bootstrap-ubuntu.sh; then
-        ((TESTS_PASSED++))
+        TESTS_PASSED=$((TESTS_PASSED + 1))
         echo ""
     else
-        ((TESTS_FAILED++))
-        echo -e "${RED}❌ Bootstrap test failed${NC}"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
         echo ""
     fi
 
     # Test 2: Dev Tools
     echo -e "${YELLOW}Integration Test 2/2: Dev Tools Installation${NC}"
     if bash tests/integration/test-dev-tools.sh; then
-        ((TESTS_PASSED++))
+        TESTS_PASSED=$((TESTS_PASSED + 1))
         echo ""
     else
-        ((TESTS_FAILED++))
+        TESTS_FAILED=$((TESTS_FAILED + 1))
         echo -e "${RED}❌ Dev tools test failed${NC}"
         echo ""
     fi
 fi
 
 # ============================================================================
-# E2E Tests (Requires Proxmox Access)
+# E2E Tests (Requires Infrastructure Access)
 # ============================================================================
 
 if [[ "$RUN_E2E" == "true" ]]; then
     echo -e "${BOLD}${BLUE}>>> Running E2E Tests${NC}"
     echo ""
 
+    # Track which E2E tests can run
+    E2E_TESTS_ATTEMPTED=0
+    E2E_TESTS_PASSED=0
+    
+    # Proxmox E2E Test
     PROXMOX_HOST="${PROXMOX_HOST:-192.168.101.155}"
     echo "Proxmox host configured: $PROXMOX_HOST"
     echo ""
 
-    echo -e "${YELLOW}E2E Test: Full Provision + Bootstrap Workflow${NC}"
+    echo -e "${YELLOW}E2E Test: Proxmox Full Provision + Bootstrap${NC}"
     if bash tests/e2e/test-full-workflow.sh; then
-        ((TESTS_PASSED++))
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        E2E_TESTS_PASSED=$((E2E_TESTS_PASSED + 1))
         echo ""
     else
-        ((TESTS_FAILED++))
-        echo -e "${RED}❌ E2E test failed${NC}"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        echo -e "${RED}❌ Proxmox E2E test failed${NC}"
         echo ""
     fi
+    E2E_TESTS_ATTEMPTED=$((E2E_TESTS_ATTEMPTED + 1))
+    
+    # AWS E2E Test
+    echo -e "${YELLOW}E2E Test: AWS EC2 Full Workflow${NC}"
+    if bash tests/e2e/test-aws-workflow.sh; then
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        E2E_TESTS_PASSED=$((E2E_TESTS_PASSED + 1))
+        echo ""
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        echo -e "${RED}❌ AWS E2E test failed${NC}"
+        echo ""
+    fi
+    E2E_TESTS_ATTEMPTED=$((E2E_TESTS_ATTEMPTED + 1))
+    
+    # QEMU E2E Test
+    echo -e "${YELLOW}E2E Test: QEMU/libvirt Full Workflow${NC}"
+    if bash tests/e2e/test-qemu-workflow.sh; then
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        E2E_TESTS_PASSED=$((E2E_TESTS_PASSED + 1))
+        echo ""
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        echo -e "${RED}❌ QEMU E2E test failed${NC}"
+        echo ""
+    fi
+    E2E_TESTS_ATTEMPTED=$((E2E_TESTS_ATTEMPTED + 1))
+    
+    echo "E2E Tests: $E2E_TESTS_PASSED/$E2E_TESTS_ATTEMPTED passed"
 fi
 
 # ============================================================================
