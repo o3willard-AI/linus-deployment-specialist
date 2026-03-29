@@ -76,6 +76,18 @@ If you are a human wanting to use this tool:
 - **Dev Tools Setup** - Python 3.12, Node.js 22, Docker CE (~5-7 min)
 - **Automated Configuration** - Cloud-init based, fully non-interactive
 - **MCP Integration** - Works with Claude Code via ssh-mcp server
+- **QA Testing Workflows** - Complete testing pipelines: provision → deploy → test → destroy → report
+
+### QA Testing Features
+
+- **Artifact Deployment** - Transfer application binaries, test files, and configuration to provisioned VMs
+- **Test Execution** - Execute test suites remotely with timeout protection and JUnit XML reporting
+- **VM Teardown** - Explicit VM destruction across all providers with safety confirmation
+- **Workflow Orchestration** - End-to-end testing: provision → deploy → test → destroy → report
+- **Multi-VM Testing** - Provision N identical VMs for distributed testing with private networking
+- **Snapshot Management** - Save/restore VM state for test isolation across providers
+- **Network Configuration** - Customize VM networking and port forwarding for service testing
+- **Result Dashboard** - Aggregate test results with HTML reports and historical comparison
 
 ---
 
@@ -559,6 +571,8 @@ linusstr/
 │   │   ├── proxmox.sh      # Proxmox VE provider (408 lines)
 │   │   ├── aws.sh          # AWS EC2 provider (405 lines)
 │   │   └── qemu.sh         # QEMU/libvirt provider (400 lines)
+│   │   ├── destroy.sh      # Cross-provider VM teardown (250 lines)
+│   │   └── multi-vm.sh     # Multi-VM provisioning for distributed testing (300 lines)
 │   │
 │   ├── bootstrap/          # OS setup
 │   │   └── ubuntu.sh       # Ubuntu 24.04 bootstrap (330 lines)
@@ -567,12 +581,32 @@ linusstr/
 │   │   ├── dev-tools.sh    # Python, Node.js, Docker (366 lines)
 │   │   └── base-packages.sh # Build tools (245 lines)
 │   │
+│   ├── deploy/             # Artifact deployment for QA testing
+│   │   └── artifact.sh     # Transfer files to provisioned VMs (280 lines)
+│   │
+│   ├── test/               # Test execution and reporting
+│   │   └── runner.sh       # Remote test execution with timeout protection (330 lines)
+│   │
+│   ├── snapshot/           # VM snapshot management
+│   │   ├── save-snapshot.sh    # Create VM snapshots for test isolation (330 lines)
+│   │   ├── restore-snapshot.sh # Restore VM from snapshot (330 lines)
+│   │   └── list-snapshots.sh   # List available snapshots (330 lines)
+│   │
+│   ├── network/            # Network configuration
+│   │   └── configure.sh    # Port forwarding and network customization (300 lines)
+│   │
 │   └── lib/                # Shared libraries
 │       ├── logging.sh      # Logging functions
 │       ├── validation.sh   # Input validation
 │       ├── mcp-helpers.sh  # MCP integration
 │       ├── noninteractive.sh # Level 2 automation
 │       └── tmux-helper.sh  # Level 3 automation
+│
+├── workflows/              # High-level automation workflows
+│   └── qa-testing.sh       # Complete QA workflow orchestrator (350 lines)
+│
+├── scripts/                # Utility scripts
+│   └── generate-report.sh  # Test result dashboard and reporting (300 lines)
 │
 ├── skill/                  # Claude Code skill documentation
 │   └── SKILL.md

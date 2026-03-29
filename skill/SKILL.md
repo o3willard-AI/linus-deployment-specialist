@@ -13,198 +13,178 @@ You are **Linus Deployment Specialist**, an infrastructure automation tool for c
 
 **Target Use Case:** Disposable dev/QA environments for AI agent testing
 
----
 
-## Quick Reference
+### 5. QA Testing Workflows
 
-### Supported Providers
-- `proxmox` - Proxmox VE (via pvesh/qm) ✅ **IMPLEMENTED**
-- `aws` - AWS EC2 (via AWS CLI) ✅ **IMPLEMENTED**
-- `qemu` - QEMU/libvirt (via virsh) ✅ **IMPLEMENTED**
-
-### Supported Operating Systems
-- `ubuntu` - Ubuntu 24.04 LTS ✅ **READY** (via Proxmox cloud-init template)
-- `almalinux` - AlmaLinux 9.x ⏳ Planned
-- `rocky` - Rocky Linux 9.x ⏳ Planned
-- `aws-linux` - Amazon Linux 2023 ⏳ Planned
-
----
-
-## Available Operations
-
-### 1. Provision VM
-
-Create a new virtual machine on the specified provider.
+Comprehensive testing capabilities for AI agent QA validation across multiple environments.
 
 **Natural Language Triggers:**
-- "Create a VM..."
-- "Spin up an instance..."
-- "Provision a server..."
-- "I need a Linux box..."
+- "Test my application on a fresh VM..."
+- "Run automated tests on a provisioned instance..."
+- "Deploy and validate my app in a clean environment..."
+- "Create a testing pipeline with artifact deployment..."
 
-**Required Information:**
-- Provider (proxmox/aws/qemu)
-- Operating System (ubuntu/almalinux/rocky/aws-linux)
-- Resources (CPU cores, RAM in GB, Disk in GB)
+**Available QA Operations:**
+
+#### 5.1: Artifact Deployment (`shared/deploy/artifact.sh`)
+**Purpose:** Transfer application binaries, test files, or configuration to provisioned VMs
 
 **Workflow:**
-1. Validate the request parameters using `validation.sh` functions
-2. Upload provisioning script to provider host via MCP `exec` (base64 encoded)
-3. Execute the provisioning script using MCP `exec` or `sudo-exec` tool
-4. Monitor script output for `LINUS_RESULT:SUCCESS`
-5. Parse output to extract VM ID, IP address, and SSH credentials
-6. Wait for VM to be accessible (SSH ready)
-7. Return connection details to user
-
----
-
-### 2. Bootstrap OS
-
-Configure a fresh VM with base packages and development tools.
-
-**Natural Language Triggers:**
-- "Set up the VM..."
-- "Install packages on..."
-- "Configure the server..."
-- "Bootstrap Ubuntu..."
-
-**Available Bootstrap Scripts:** ✅ **IMPLEMENTED**
-
-#### 2.1: OS Bootstrap (`shared/bootstrap/ubuntu.sh`)
-**Purpose:** Initial OS-level setup with essential packages
-
-**Installs:**
-- Essential tools: curl, wget, git, vim, nano, tmux, screen, htop, ncdu, tree
-- Configures timezone (default: UTC)
-- Configures locale (default: en_US.UTF-8)
-- Optional extras: build-essential, software-properties-common
+1. Validate source files exist locally
+2. Check SSH connectivity to target VM
+3. Use `rsync` (preferred) or `scp` (fallback) for transfer
+4. Report progress and verify file integrity
+5. Output `LINUS_RESULT:SUCCESS` with transfer statistics
 
 **Environment Variables:**
-- `TIMEZONE` - System timezone (default: UTC)
-- `LOCALE` - System locale (default: en_US.UTF-8)
-- `INSTALL_EXTRAS` - Install build tools (default: false)
-- `SKIP_UPGRADE` - Skip apt upgrade (default: false)
+- `TARGET_IP` - IP address of target VM
+- `TARGET_USER` - SSH username on target VM  
+- `SOURCE_PATH` - Local path to files/directories to deploy
+- `TARGET_PATH` - Remote destination path (default: /home/$TARGET_USER/)
+- `DRY_RUN` - Show what would be done without executing
 
-**Duration:** ~2 minutes
+#### 5.2: Test Execution (`shared/test/runner.sh`)
+**Purpose:** Execute test suites remotely on provisioned VMs
 
-#### 2.2: Dev Tools (`shared/configure/dev-tools.sh`)
-**Purpose:** Install development environment
-
-**Installs:**
-- Python 3.12 + pip + venv
-- Node.js 22 LTS (via NodeSource)
-- Docker CE + docker-compose plugin
-- Configures Docker service and user permissions
+**Workflow:**
+1. Connect to target VM via SSH
+2. Execute test command with timeout protection
+3. Capture stdout/stderr to local files
+4. Generate JUnit XML report if requested
+5. Parse test exit code and output results
 
 **Environment Variables:**
-- `PYTHON_VERSION` - Python version (default: 3)
-- `NODE_VERSION` - Node.js version (default: 22)
-- `INSTALL_DOCKER` - Install Docker (default: true)
-- `DOCKER_USER` - User for docker group (default: ubuntu)
+- `TARGET_IP`, `TARGET_USER` - VM connection details
+- `TEST_COMMAND` - Command to execute tests
+- `TIMEOUT_SECONDS` - Maximum execution time (default: 300)
+- `OUTPUT_DIR` - Local directory for test results
+- `JUNIT_OUTPUT` - Generate JUnit XML report (default: false)
 
-**Duration:** ~5-7 minutes (Docker install takes time)
-
-#### 2.3: Base Packages (`shared/configure/base-packages.sh`)
-**Purpose:** Install build tools and utilities
-
-**Installs:**
-- Build tools: gcc, g++, make, cmake, gdb
-- SSL/Crypto: openssl, ca-certificates, libssl-dev
-- Network: net-tools, nmap, dnsutils, netcat, traceroute
-- Utilities: jq, unzip, zip, tar, rsync, less, which, file
-
-**Environment Variables:**
-- `INSTALL_BUILD_TOOLS` - Install gcc, make, etc. (default: true)
-- `INSTALL_NETWORK_TOOLS` - Install network utilities (default: true)
-
-**Duration:** ~1 minute
+#### 5.3: VM Teardown (`shared/provision/destroy.sh`)
+**Purpose:** Explicit VM destruction across all providers
 
 **Workflow:**
-1. Upload required libraries (`logging.sh`, `validation.sh`, `noninteractive.sh`) to VM
-2. Upload bootstrap script(s) to VM via MCP `exec` (base64 encoded)
-3. Execute script: `bash ubuntu.sh` (or dev-tools.sh, base-packages.sh)
-4. Monitor execution for `LINUS_RESULT:SUCCESS`
-5. Verify installed packages with version checks
-6. Return bootstrap status with installed tools list
-
----
-
-### 3. Full Deployment (Provision + Bootstrap)
-
-Create and configure a complete development environment in one workflow.
-
-**Natural Language Triggers:**
-- "Create a fully configured development VM..."
-- "Set up a complete environment with Python and Docker..."
-- "I need a VM ready for development..."
-
-**Total Duration:** ~10-12 minutes
-
-**Workflow:**
-
-#### Step 1: Provision VM (~2 minutes)
-1. Execute `proxmox.sh` on Proxmox host
-2. Parse output for VM_ID, VM_IP, VM_USER
-3. Verify SSH accessibility
-
-#### Step 2: Bootstrap Ubuntu (~2 minutes)
-1. Upload `ubuntu.sh` and libraries to VM
-2. Execute: `sudo bash ubuntu.sh`
-3. Verify essential packages installed
-
-#### Step 3: Install Dev Tools (~5-7 minutes)
-1. Upload `dev-tools.sh` and libraries to VM
-2. Execute: `sudo bash dev-tools.sh`
-3. Verify Python, Node.js, Docker installed
-
-#### Step 4: Install Base Packages (~1 minute)
-1. Upload `base-packages.sh` and libraries to VM
-2. Execute: `sudo bash base-packages.sh`
-3. Verify build tools and utilities installed
-
-#### Step 5: Final Verification
-1. SSH to VM and run version checks:
-   - `python3 --version`
-   - `node --version`
-   - `docker --version`
-   - `gcc --version`
-2. Verify Docker service is running
-3. Confirm disk space and memory allocation
-
-**Return to User:**
-```
-✅ Full Development Environment Ready!
-
-VM Details:
-- VM ID: 113
-- IP: 192.168.101.113
-- SSH: ssh ubuntu@192.168.101.113
-
-Installed Tools:
-- Python 3.12.0
-- Node.js v22.11.0
-- Docker 24.0.7
-- GCC 11.4.0
-- Build tools (make, cmake, gdb)
-- Utilities (jq, curl, wget, git)
-
-Total Time: 10 minutes 23 seconds
-```
-
----
-
-### 4. Delete VM
-
-Remove a VM when no longer needed.
-
-**Workflow:**
-1. Connect to provider host via MCP
-2. Execute provider-specific deletion command
+1. Confirm VM destruction (unless `FORCE_DESTROY=true`)
+2. Execute provider-specific destruction command
 3. Verify VM no longer exists
-4. Return deletion confirmation
+4. Clean up associated resources (snapshots, networks)
+5. Return destruction confirmation
+
+**Environment Variables:**
+- `PROVIDER` - VM provider (proxmox/aws/qemu)
+- `VM_IDENTIFIER` - VM ID, instance ID, or name
+- `FORCE_DESTROY` - Skip confirmation (default: false)
+
+#### 5.4: Complete QA Workflow (`workflows/qa-testing.sh`)
+**Purpose:** End-to-end testing pipeline: provision → deploy → test → destroy → report
+
+**Workflow:**
+1. Provision test VM with specified configuration
+2. Deploy application artifacts
+3. Execute test suites
+4. Capture and analyze results
+5. Clean up resources (if `--cleanup` specified)
+6. Generate comprehensive test report
+
+**Command Line Options:**
+- `--provider` - VM provider (required)
+- `--artifact` - Path to application artifact
+- `--test-command` - Test execution command
+- `--cleanup` - Destroy VM after testing
+- `--config` - Configuration file path
+
+#### 5.5: Multi-VM Testing (`shared/provision/multi-vm.sh`)
+**Purpose:** Provision N identical VMs for distributed testing
+
+**Workflow:**
+1. Create specified number of identical VMs
+2. Configure private networking between VMs
+3. Output connection details for all VMs
+4. Enable batch operations for parallel testing
+
+**Environment Variables:**
+- `PROVIDER` - VM provider
+- `VM_COUNT` - Number of VMs to create (default: 2)
+- `NETWORK_CONFIG` - Networking configuration
+- `VM_CPU`, `VM_RAM`, `VM_DISK` - Resource allocation
+
+#### 5.6: Snapshot Management (`shared/snapshot/`)
+**Purpose:** Save/restore VM state for test isolation
+
+**Available Scripts:**
+- `save-snapshot.sh` - Create VM snapshot
+- `restore-snapshot.sh` - Restore VM from snapshot  
+- `list-snapshots.sh` - List available snapshots
+
+**Workflow:**
+1. Stop VM if running (with graceful shutdown)
+2. Create snapshot with metadata
+3. Restart VM after snapshot creation
+4. Restore to known good state between test runs
+
+#### 5.7: Network Configuration (`shared/network/configure.sh`)
+**Purpose:** Customize VM networking for service testing
+
+**Workflow:**
+1. Parse port forwarding rules
+2. Apply provider-specific network configuration
+3. Configure security groups/firewall rules
+4. Verify network connectivity
+
+**Environment Variables:**
+- `PROVIDER` - VM provider
+- `VM_IDENTIFIER` - VM identification
+- `PORT_FORWARDS` - Port mapping rules (e.g., "8080:80,3000:3000")
+
+#### 5.8: Result Dashboard (`scripts/generate-report.sh`)
+**Purpose:** Aggregate and visualize test results
+
+**Workflow:**
+1. Collect test results from multiple runs
+2. Generate HTML dashboard with pass/fail statistics
+3. Include historical comparison for trend analysis
+4. Output performance metrics and recommendations
+
+**Command Line Options:**
+- `--input-dir` - Directory containing test results
+- `--output` - Output HTML file path
+- `--historical` - Include historical data comparison
+
+**Quick Example: Full QA Testing**
+```bash
+# Complete automated testing workflow
+export PROVIDER="proxmox"
+export VM_CPU=4
+export VM_RAM=8192
+
+./workflows/qa-testing.sh \
+  --provider="$PROVIDER" \
+  --artifact="./build/app.tar.gz" \
+  --test-command="cd /home/ubuntu && python -m pytest" \
+  --cleanup
+```
+
+**Expected Output:**
+```
+✅ QA Testing Workflow Started
+  ├── Stage 1: Provisioning VM... ✓
+  ├── Stage 2: Deploying artifacts... ✓
+  ├── Stage 3: Executing tests... ✓
+  ├── Stage 4: Analyzing results... ✓
+  └── Stage 5: Cleaning up... ✓
+
+📊 Test Results:
+  - Total Tests: 42
+  - Passed: 40
+  - Failed: 2
+  - Duration: 3m 22s
+
+LINUS_TEST_RESULT:PASS
+LINUS_TEST_DURATION:202
+LINUS_TEST_FAILED:test_api_endpoints,test_database_connection
+```
 
 ---
-
 ## Script Locations
 
 All scripts are in the `shared/` directory:
@@ -215,17 +195,36 @@ shared/
 │   ├── proxmox.sh          ✅ Proxmox VM lifecycle management
 │   ├── aws.sh              ✅ AWS EC2 instance provisioning
 │   └── qemu.sh             ✅ QEMU/libvirt VM provisioning
+│   ├── destroy.sh          ✅ Cross-provider VM teardown
+│   └── multi-vm.sh         ✅ Multi-VM provisioning for distributed testing
 ├── bootstrap/              ✅ OS-level setup scripts
 │   └── ubuntu.sh           ✅ Ubuntu 24.04 bootstrap
 ├── configure/              ✅ Development environment setup
 │   ├── dev-tools.sh        ✅ Python, Node.js, Docker
 │   └── base-packages.sh    ✅ Build tools and utilities
+├── deploy/                 ✅ Artifact deployment for QA testing
+│   └── artifact.sh         ✅ Transfer files to provisioned VMs
+├── test/                   ✅ Test execution and reporting
+│   └── runner.sh           ✅ Remote test execution with timeout protection
+├── snapshot/               ✅ VM snapshot management
+│   ├── save-snapshot.sh    ✅ Create VM snapshots for test isolation
+│   ├── restore-snapshot.sh ✅ Restore VM from snapshot
+│   └── list-snapshots.sh   ✅ List available snapshots
+├── network/                ✅ Network configuration
+│   └── configure.sh        ✅ Port forwarding and network customization
 └── lib/
     ├── logging.sh          ✅ Logging and output formatting
     ├── validation.sh       ✅ Input validation and checks
     ├── mcp-helpers.sh      ✅ MCP integration utilities
     ├── noninteractive.sh   ✅ Level 2 automation (smart wrappers)
     └── tmux-helper.sh      ✅ Level 3 automation (session mgmt)
+
+Additional directories:
+workflows/
+└── qa-testing.sh          ✅ Complete QA workflow orchestrator
+
+scripts/
+└── generate-report.sh     ✅ Test result dashboard and reporting
 ```
 
 ---

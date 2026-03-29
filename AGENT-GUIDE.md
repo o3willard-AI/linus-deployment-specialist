@@ -709,6 +709,38 @@ Docker: Docker version 29.1.3, build 4433759
 
 ---
 
+## QA Testing Workflows
+
+Linus Deployment Specialist includes comprehensive QA testing capabilities for AI agents:
+
+### Quick QA Testing Example
+```bash
+# Full automated testing workflow
+export PROVIDER="proxmox"
+export VM_CPU=4
+export VM_RAM=8192
+
+./workflows/qa-testing.sh \
+  --provider="$PROVIDER" \
+  --artifact="./build/app.tar.gz" \
+  --test-command="cd /home/ubuntu && python -m pytest" \
+  --cleanup
+```
+
+### Available QA Operations
+- **Artifact Deployment** (`shared/deploy/artifact.sh`): Transfer files to VMs
+- **Test Execution** (`shared/test/runner.sh`): Run tests remotely with timeout protection  
+- **VM Teardown** (`shared/provision/destroy.sh`): Clean up resources
+- **Complete Workflow** (`workflows/qa-testing.sh`): End-to-end testing pipeline
+- **Multi-VM Testing** (`shared/provision/multi-vm.sh`): Distributed testing environments
+- **Snapshot Management** (`shared/snapshot/`): Save/restore VM state for isolation
+- **Network Configuration** (`shared/network/configure.sh`): Port forwarding for services
+- **Result Dashboard** (`scripts/generate-report.sh`): Aggregate and visualize test results
+
+For detailed usage, refer to script headers and `QA-TESTING-ENHANCEMENTS-IMPLEMENTATION-GUIDE.md`.
+
+---
+
 ## Agent Capabilities Summary
 
 After successful installation and configuration, AI agents can autonomously:
@@ -719,6 +751,7 @@ After successful installation and configuration, AI agents can autonomously:
 ✅ **Verify successful deployment** through structured output parsing
 ✅ **Handle errors** using decision trees and troubleshooting procedures
 ✅ **Execute complete workflows** from provisioning to ready-for-use state
+✅ **Perform QA testing** with artifact deployment, test execution, and result reporting
 
 **No human intervention required** when:
 - Provider credentials are pre-configured

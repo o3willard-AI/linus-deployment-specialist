@@ -1,0 +1,18 @@
+Linus Deployment Specialist - Test Report
+==========================================
+Date: Sun Mar 29 08:57:57 PM UTC 2026
+Duration: 1s
+
+Results:
+- Passed:  1
+- Failed:  0
+- Skipped: 0
+
+Configuration:
+- Smoke Tests: true
+- Integration Tests: false
+- E2E Tests: false
+
+Environment:
+- TEST_VM_IP: not set
+- PROXMOX_HOST: not set

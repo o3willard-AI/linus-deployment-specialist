@@ -1,0 +1,26 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "lmstudio": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "LM Studio (192.168.101.21)",
+      "options": {
+        "baseURL": "http://192.168.101.21:1234/v1"
+      },
+      "models": {
+        "qwen/qwen3-coder-30b": {
+          "name": "Qwen3 Coder 30B (local)"
+        },
+        "qwen/qwen3.5-35b-a3b": {
+          "name": "Qwen3.5 35B A3B (local)"
+        },
+        "openai/gpt-oss-20b": {
+          "name": "GPT OSS 20B (local)"
+        },
+        "mistralai/ministral-3-14b-reasoning": {
+          "name": "Ministral 3 14B Reasoning (local)"
+        }
+      }
+    }
+  }
+}
