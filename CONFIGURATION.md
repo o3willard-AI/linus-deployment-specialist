@@ -680,48 +680,6 @@ ISSUE: Configuration verification fails
 
 ---
 
-## LM Studio Model Provider Configuration
-
-For AI agents using opencode, you can configure local LM Studio model servers as alternative model providers.
-
-### Available LM Studio Server
-- **Endpoint:** `http://192.168.101.21:1234/v1`
-- **Provider ID:** `lmstudio-local-192-168-101-21`
-- **Models:** 
-  - `qwen/qwen3-coder-30b` - Qwen3 Coder 30B (coding optimized)
-  - `qwen/qwen3.5-35b-a3b` - Qwen3.5 35B A3B
-  - `openai/gpt-oss-20b` - GPT OSS 20B (reasoning enabled)
-  - `mistralai/ministral-3-14b-reasoning` - Ministral 3 14B Reasoning
-
-### Verification Commands
-
-```bash
-# Check provider exists in opencode configuration
-jq '.["lmstudio-local-192-168-101-21"].api' ~/.cache/opencode/models.json
-
-# List available models
-jq '.["lmstudio-local-192-168-101-21"].models | keys' ~/.cache/opencode/models.json
-
-# Test server connectivity
-curl -s http://192.168.101.21:1234/v1/models | jq '.data[].id'
-```
-
-### Usage Notes
-- This provider uses the `@ai-sdk/openai-compatible` npm package
-- No API key required (local server)
-- Models are configured with default context/output limits
-- For production use, update model details (release dates, capabilities) in `~/.cache/opencode/models.json`
-
-### Adding Additional LM Studio Servers
-To add another LM Studio server, run:
-```bash
-# Update the API endpoint in the provider configuration
-jq '.["lmstudio-local-192-168-101-21"].api = "http://NEW_IP:PORT/v1"' ~/.cache/opencode/models.json > models-new.json
-mv models-new.json ~/.cache/opencode/models.json
-```
-
----
-
 ## Security Considerations
 
 ### Important Notes for Agents
