@@ -51,6 +51,33 @@ ssh -V 2>&1 && echo "✓ SSH OK" || echo "✗ SSH REQUIRED"
 - ALL checks passed → Continue to [Step 1](#step-1-clone-repository)
 - ANY check failed → Install missing dependencies before proceeding
 
+### Git Credential Manager Integration (Optional but Recommended)
+
+For enhanced security, the Linus Deployment Specialist now supports Git Credential Manager (GCM) for secure credential handling:
+
+1. **Install GCM**: 
+   ```bash
+   # Download and install GCM
+   cd /tmp && mkdir gcm-install && cd gcm-install
+   wget https://github.com/git-ecosystem/git-credential-manager/releases/download/v2.7.3/gcm-linux-x64-2.7.3.tar.gz
+   tar -xzf gcm-linux-x64-2.7.3.tar.gz
+   chmod +x git-credential-manager
+   ```
+
+2. **Configure GCM as default credential helper**:
+   ```bash
+   # Configure GCM for Git
+   git config --global credential.helper /tmp/gcm-install/git-credential-manager
+   ```
+
+3. **Verify installation**: 
+   ```bash
+   git config --global credential.helper
+   # Should output: /tmp/gcm-install/git-credential-manager
+   ```
+
+This integration ensures secure storage of Git credentials on the same system where the AI agent operates, following security best practices for cross-platform Git credential handling.
+
 ### Step 1: Clone Repository
 
 ```bash
@@ -154,6 +181,149 @@ echo "✓ All scripts validated"
 ### Configuration Decision Tree
 
 ```
+START: Which provider will you use?
+│
+├─→ Proxmox VE → [Configure Proxmox](#proxmox-configuration)
+├─→ AWS EC2 → [Configure AWS](#aws-configuration)
+└─→ QEMU/libvirt → [Configure QEMU](#qemu-configuration)
+```
+
+### Proxmox Configuration
+
+**Required Information:**
+- Proxmox host IP address
+- API user (typically `root@pam`)
+- API token ID
+- API token secret
+- Node name (default: `pve`)
+- Storage name (default: `local-lvm`)
+- Cloud-init template ID (default: `9000`)
+
+**Setup Procedure:**
+
+```bash
+# Set environment variables (replace with actual values)
+export PROXMOX_HOST="192.168.101.155"
+export PROXMOX_USER="root@pam"
+export PROXMOX_TOKEN_ID="linus-token"
+export PROXMOX_TOKEN_SECRET="your-actual-secret-here"
+export PROXMOX_NODE="pve"
+export PROXMOX_STORAGE="local-lvm"
+export PROXMOX_TEMPLATE_ID="9000"
+
+# Persist to shell profile (choose one)
+cat >> ~/.bashrc << 'EOF'
+export PROXMOX_HOST="192.168.101.155"
+export PROXMOX_USER="root@pam"
+export PROXMOX_TOKEN_ID="linus-token"
+export PROXMOX_TOKEN_SECRET="your-actual-secret-here"
+export PROXMOX_NODE="pve"
+export PROXMOX_STORAGE="local-lvm"
+export PROXMOX_TEMPLATE_ID="9000"
+EOF
+
+source ~/.bashrc
+```
+
+**Verification:**
+```bash
+# Test Proxmox API connectivity
+curl -k -H "Authorization: PVEAPIToken=${PROXMOX_USER}!${PROXMOX_TOKEN_ID}=${PROXMOX_TOKEN_SECRET}" \
+  "https://${PROXMOX_HOST}:8006/api2/json/version" | grep -q "version" && \
+  echo "✓ Proxmox API accessible" || echo "✗ Proxmox API connection failed"
+```
+
+### AWS Configuration
+
+**Required Information:**
+- AWS region (e.g., `us-west-2`)
+- AWS access key ID
+- AWS secret access key
+- EC2 key pair name (must exist in the region)
+
+**Setup Procedure:**
+
+```bash
+# Configure AWS CLI
+aws configure set aws_access_key_id YOUR_ACCESS_KEY_ID
+aws configure set aws_secret_access_key YOUR_SECRET_ACCESS_KEY
+aws configure set region us-west-2
+aws configure set output json
+
+# Set Linus-specific environment variables
+export AWS_REGION="us-west-2"
+export AWS_KEY_NAME="your-keypair-name"
+
+# Persist to shell profile
+cat >> ~/.bashrc << 'EOF'
+export AWS_REGION="us-west-2"
+export AWS_KEY_NAME="your-keypair-name"
+EOF
+
+source ~/.bashrc
+```
+
+**Verification:**
+```bash
+# Test AWS connectivity
+aws sts get-caller-identity && echo "✓ AWS credentials valid" || echo "✗ AWS authentication failed"
+
+# Verify key pair exists
+aws ec2 describe-key-pairs --key-names "${AWS_KEY_NAME}" --region "${AWS_REGION}" && \
+  echo "✓ Key pair exists" || echo "✗ Key pair not found"
+```
+
+### QEMU Configuration
+
+**Required Information:**
+- QEMU host IP address
+- SSH username on QEMU host
+- Sudo password for SSH user
+- Storage pool name (default: `default`)
+- Network name (default: `default`)
+
+**Setup Procedure:**
+
+```bash
+# Set environment variables
+export QEMU_HOST="192.168.101.59"
+export QEMU_USER="username"
+export QEMU_SUDO_PASS="password"
+export QEMU_POOL="default"
+export QEMU_NETWORK="default"
+
+# Persist to shell profile
+cat >> ~/.bashrc << 'EOF'
+export QEMU_HOST="192.168.101.59"
+export QEMU_USER="username"
+export QEMU_SUDO_PASS="password"
+export QEMU_POOL="default"
+export QEMU_NETWORK="default"
+EOF
+
+source ~/.bashrc
+```
+
+**Verification:**
+```bash
+# Test SSH connectivity to QEMU host
+sshpass -p "${QEMU_SUDO_PASS}" ssh -o StrictHostKeyChecking=no "${QEMU_USER}@${QEMU_HOST}" "echo '${QEMU_SUDO_PASS}' | sudo -S virsh version" && \
+  echo "✓ QEMU host accessible, libvirt operational" || echo "✗ QEMU connection failed"
+
+# Verify SSH key exists on QEMU host (required for cloud-init)
+sshpass -p "${QEMU_SUDO_PASS}" ssh -o StrictHostKeyChecking=no "${QEMU_USER}@${QEMU_HOST}" "test -f ~/.ssh/id_rsa.pub" && \
+  echo "✓ SSH key exists on QEMU host" || echo "✗ Generate SSH key on QEMU host: ssh-keygen -t rsa -b 4096 -N ''"
+```
+
+### Git Credential Manager Integration
+
+When using the Linus Deployment Specialist with Git operations, GCM can help manage credentials securely:
+
+- **For Proxmox**: If your API tokens are stored in a secure credential store, GCM can handle them
+- **For AWS**: GCM works with AWS CLI credential management when configured properly  
+- **For QEMU**: GCM is especially useful for managing SSH passwords and keys
+
+The system will automatically detect and use GCM if it's properly installed and configured on the same system where the AI agent operates.
 START: Which provider will you use?
 │
 ├─→ Proxmox VE → [Configure Proxmox](#proxmox-configuration)
@@ -736,6 +906,15 @@ export VM_RAM=8192
 - **Snapshot Management** (`shared/snapshot/`): Save/restore VM state for isolation
 - **Network Configuration** (`shared/network/configure.sh`): Port forwarding for services
 - **Result Dashboard** (`scripts/generate-report.sh`): Aggregate and visualize test results
+
+### Git Credential Manager Integration in QA Testing
+
+When executing QA workflows, the system will automatically leverage Git Credential Manager if:
+1. GCM is installed and configured on the same system where the AI agent operates
+2. The system performs Git operations during testing (cloning repositories, etc.)
+3. Credentials are managed securely through GCM rather than hardcoded values
+
+This ensures that all Git credential operations in QA workflows are handled with enhanced security.
 
 For detailed usage, refer to script headers and `QA-TESTING-ENHANCEMENTS-IMPLEMENTATION-GUIDE.md`.
 

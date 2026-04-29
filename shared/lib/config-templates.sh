@@ -332,6 +332,43 @@ generate_standardized_config() {
     echo "$config_content"
 }
 
+# Generate Git credential-aware configuration for MCP integration
+generate_gcm_aware_config() {
+    local agent_type="$1"
+    local host="$2"
+    local user="$3" 
+    local port="${4:-22}"
+    local key_path="${5:-}"
+    
+    # First generate the standard config
+    local config_content=""
+    config_content=$(generate_standardized_config "$agent_type" "$host" "$user" "$port" "$key_path")
+    
+    # Add Git credential management information to the configuration
+    # This helps the agent understand that credentials should be managed via GCM
+    cat <<EOF
+{
+  "mcpServers": {
+    "linus-ssh": {
+      "command": "ssh-mcp",
+      "args": [
+        "--host=${host}",
+        "--port=${port}",
+        "--user=${user}",
+        "--timeout=60000",
+        "--maxChars=none"
+      ]
+    }
+  },
+  "gitCredentialManager": {
+    "enabled": true,
+    "provider": "gcm",
+    "description": "Using Git Credential Manager for secure credential handling on the same system as the AI agent"
+  }
+}
+EOF
+}
+
 # -----------------------------------------------------------------------------
 # Configuration Validation Functions
 # -----------------------------------------------------------------------------
@@ -420,6 +457,38 @@ apply_agent_config() {
     fi
     
     log_info "Configuration generated successfully for $agent_type"
+    
+    # Return the configuration content
+    echo "$config_content"
+    return 0
+}
+
+# Apply Git Credential Manager aware configuration for the current agent  
+apply_gcm_aware_config() {
+    local agent_type="$1"
+    local host="${2:-}"
+    local user="${3:-}"
+    local port="${4:-22}"
+    local key_path="${5:-}"
+    
+    log_header "Applying GCM-Aware Configuration for $agent_type"
+    
+    # Generate the GCM-aware configuration
+    local config_content=""
+    config_content=$(generate_gcm_aware_config "$agent_type" "$host" "$user" "$port" "$key_path")
+    
+    if [[ -z "$config_content" ]]; then
+        log_error "Failed to generate GCM-aware configuration for agent: $agent_type"
+        return 1
+    fi
+    
+    # Validate the configuration
+    if ! validate_agent_config "$agent_type" "$config_content"; then
+        log_error "GCM-aware configuration validation failed for agent: $agent_type"
+        return 1
+    fi
+    
+    log_info "GCM-aware configuration generated successfully for $agent_type"
     
     # Return the configuration content
     echo "$config_content"

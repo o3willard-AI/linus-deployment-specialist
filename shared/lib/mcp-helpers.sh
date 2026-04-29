@@ -33,6 +33,20 @@ if [[ -z "${LINUS_UNIVERSAL_COMMUNICATION_LOADED:-}" ]]; then
     source "${SCRIPT_DIR}/universal-communication.sh"
 fi
 
+# Check if Git Credential Manager is available and configured
+check_gcm_configured() {
+    local gcm_path=""
+    gcm_path=$(git config --global credential.helper 2>/dev/null)
+    
+    if [[ -n "$gcm_path" && "$gcm_path" == *"gcm"* ]]; then
+        log_debug "Git Credential Manager is configured: $gcm_path"
+        return 0
+    else
+        log_debug "Git Credential Manager not properly configured"
+        return 1
+    fi
+}
+
 # Mark mcp-helpers as loaded
 LINUS_MCP_HELPERS_LOADED=1
 

@@ -101,6 +101,33 @@ sudo apt-get install -y bash openssh-client curl git sshpass nodejs npm
 - Same requirements as above - needs bash environment
 - Windows users must configure IDE to use WSL terminal
 
+### Git Credential Manager Integration
+
+For enhanced security, the Linus Deployment Specialist now supports Git Credential Manager (GCM) for secure credential handling:
+
+1. **Install GCM**: 
+   ```bash
+   # Download and install GCM
+   cd /tmp && mkdir gcm-install && cd gcm-install
+   wget https://github.com/git-ecosystem/git-credential-manager/releases/download/v2.7.3/gcm-linux-x64-2.7.3.tar.gz
+   tar -xzf gcm-linux-x64-2.7.3.tar.gz
+   chmod +x git-credential-manager
+   ```
+
+2. **Configure GCM as default credential helper**:
+   ```bash
+   # Configure GCM for Git
+   git config --global credential.helper /tmp/gcm-install/git-credential-manager
+   ```
+
+3. **Verify installation**: 
+   ```bash
+   git config --global credential.helper
+   # Should output: /tmp/gcm-install/git-credential-manager
+   ```
+
+This integration ensures secure storage of Git credentials on the same system where the AI agent operates, following security best practices for cross-platform Git credential handling.
+
 ---
 
 ## GitHub Copilot Configuration for Windows
