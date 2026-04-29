@@ -13,6 +13,26 @@ if [[ -z "${LINUS_LOGGING_LOADED:-}" ]]; then
     source "${SCRIPT_DIR}/logging.sh"
 fi
 
+# Load universal MCP adapter framework
+if [[ -z "${LINUS_MCP_ADAPTER_LOADED:-}" ]]; then
+    source "${SCRIPT_DIR}/mcp-adapters/universal-mcp-adapter.sh"
+fi
+
+# Load agent detection system
+if [[ -z "${LINUS_AGENT_DETECTION_LOADED:-}" ]]; then
+    source "${SCRIPT_DIR}/agent-detection.sh"
+fi
+
+# Load configuration templates
+if [[ -z "${LINUS_CONFIG_TEMPLATES_LOADED:-}" ]]; then
+    source "${SCRIPT_DIR}/config-templates.sh"
+fi
+
+# Load universal communication protocol
+if [[ -z "${LINUS_UNIVERSAL_COMMUNICATION_LOADED:-}" ]]; then
+    source "${SCRIPT_DIR}/universal-communication.sh"
+fi
+
 # Mark mcp-helpers as loaded
 LINUS_MCP_HELPERS_LOADED=1
 

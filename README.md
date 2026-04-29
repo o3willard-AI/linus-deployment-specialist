@@ -37,71 +37,7 @@ If you are an AI agent (Claude, Gemini, etc.) tasked with provisioning Linux VMs
 - **Non-Interactive:** All scripts use `-y`, `-f`, `-q` flags for autonomous execution
 - **Verification Commands:** Every step includes verification commands with expected outputs
 - **Decision Trees:** Comprehensive troubleshooting procedures for autonomous error resolution
-
-### Human Users
-
-If you are a human wanting to use this tool:
-- Point your AI coding agent to this repository
-- Ensure the agent has tool use enabled
-- The agent will handle installation, configuration, and operation autonomously
-
----
-
-## 🎯 What Is This?
-
-**Linus** helps AI agents (Claude, Gemini, etc.) provision fresh Linux development environments on demand. Perfect for:
-
-- **AI Agent Developers** - Test agents in clean, isolated environments
-- **QA Engineers** - Spin up disposable test VMs
-- **DevOps Teams** - Prototype infrastructure quickly
-
-**Philosophy:** Simplicity > Security | Reliability > Features | Speed > Perfection
-
----
-
-## ✨ Features
-
-### Supported Providers (All ✅ Implemented in v1.0)
-
-| Provider | Type | Use Case | Status |
-|----------|------|----------|--------|
-| **Proxmox VE** | On-premise/Homelab | Primary production | ✅ |
-| **AWS EC2** | Cloud | Scalable cloud instances | ✅ |
-| **QEMU/libvirt** | Local/Homelab | Local development | ✅ |
-
-### Core Capabilities
-
-- **VM Provisioning** - Create VMs with custom CPU/RAM/disk specifications
-- **OS Bootstrapping** - Ubuntu 24.04 LTS with essential packages (~2 min)
-- **Dev Tools Setup** - Python 3.12, Node.js 22, Docker CE (~5-7 min)
-- **Automated Configuration** - Cloud-init based, fully non-interactive
-- **MCP Integration** - Works with Claude Code via ssh-mcp server
-- **QA Testing Workflows** - Complete testing pipelines: provision → deploy → test → destroy → report
-
-### QA Testing Features
-
-- **Artifact Deployment** - Transfer application binaries, test files, and configuration to provisioned VMs
-- **Test Execution** - Execute test suites remotely with timeout protection and JUnit XML reporting
-- **VM Teardown** - Explicit VM destruction across all providers with safety confirmation
-- **Workflow Orchestration** - End-to-end testing: provision → deploy → test → destroy → report
-- **Multi-VM Testing** - Provision N identical VMs for distributed testing with private networking
-- **Snapshot Management** - Save/restore VM state for test isolation across providers
-- **Network Configuration** - Customize VM networking and port forwarding for service testing
-- **Result Dashboard** - Aggregate test results with HTML reports and historical comparison
-
----
-
-## 🚀 Quick Start
-
-### Platform Requirements
-
-**Local Machine (where AI agent runs):**
-
-| Platform | Status | Setup Required |
-|----------|--------|----------------|
-| **Linux** | ✅ Fully Supported | Install: `bash`, `ssh`, `sshpass`, `nodejs` |
-| **macOS** | ✅ Supported | Install: `brew install sshpass` (for QEMU only) |
-| **Windows** | ⚠️ WSL Required | Must use WSL 2 with Ubuntu - **native Windows not supported** |
+- **Multi-Agent Compatibility:** Works seamlessly with Claude Code, Gemini, Copilot, Cursor, Cline, Opencode, and Hermes
 
 ### AI Agent Compatibility
 
@@ -111,6 +47,11 @@ If you are a human wanting to use this tool:
 | **GitHub Copilot** | ✅ Native | ✅ Native | ⚠️ VS Code terminal → WSL |
 | **Gemini Code Assist** | ✅ Native | ✅ Native | ⚠️ Needs WSL terminal |
 | **Cursor** | ✅ Native | ✅ Native | ⚠️ Needs WSL terminal |
+| **Cline** | ✅ Native | ✅ Native | ⚠️ Needs WSL terminal |
+| **Opencode** | ✅ Native | ✅ Native | ⚠️ Needs WSL terminal |
+| **Hermes** | ✅ Native | ✅ Native | ⚠️ Needs WSL terminal |
+
+All agents use the same underlying ssh-mcp protocol with standardized configuration templates.
 
 <details>
 <summary><b>Why doesn't Windows work natively?</b></summary>
