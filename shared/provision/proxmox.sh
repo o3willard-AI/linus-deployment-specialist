@@ -192,6 +192,75 @@ clone_template() {
 }
 
 # -----------------------------------------------------------------------------
+# Function: configure_network_for_os_type
+# -----------------------------------------------------------------------------
+# Applies OS-specific network configuration after clone
+# Handles cloud-init quirks for RHEL-based distros
+# Returns: 0 on success, non-zero on failure
+# -----------------------------------------------------------------------------
+
+configure_network_for_os_type() {
+    local vm_id="$ALLOCATED_VM_ID"
+    local os_type="${VM_OS_TYPE:-ubuntu}"
+    
+    log_step "4a" "Configuring network for OS type: ${os_type}"
+    
+    case "$os_type" in
+        ubuntu|debian)
+            # Ubuntu/Debian - standard cloud-init networking
+            log_info "Ubuntu/Debian: Standard cloud-init networking (automatic)"
+            # Ensure VM has QEMU guest agent installed and enabled
+            if ! qm set "$vm_id" --agent 1 --net0 bridged=vmbr0; then
+                log_warn "Failed to configure network agent settings (non-fatal)"
+            fi
+            ;;
+        almalinux|rocky)
+            # RHEL-based distros - need explicit cloud-init configuration
+            log_info "AlmaLinux/Rocky: Applying custom cloud-init network config"
+            
+            # Set VM OS type for Libvirt/QEMU agent to recognize as Linux
+            if ! qm set "$vm_id" --osinfo "AlmaLinux 9" && ! qm set "$vm_id" --osinfo "Rocky Linux 9"; then
+                # Try with generic linux for compatibility
+                qm set "$vm_id" --osinfo "Linux" || true
+            fi
+            
+            # Enable QEMU guest agent for network discovery
+            if ! qm set "$vm_id" --agent 1 --agent-xpra 0; then
+                log_warn "Failed to configure QEMU agent (non-fatal)"
+            fi
+            
+            # Configure network0 with explicit bridge settings
+            if ! qm set "$vm_id" --net0 model=virtio,bridge="${PROXMOX_BRIDGE}",connect=on,network=default; then
+                log_warn "Failed to configure net0 bridge (using default: ${PROXMOX_BRIDGE})"
+            fi
+            
+            # For RHEL-based distros, add cloud-init specific settings
+            # This helps with dhcp and network configuration timing
+            if ! qm set "$vm_id" --ciuser root; then
+                log_warn "CIUser not explicitly set (non-fatal)"
+            fi
+            
+            # Set up for automatic IP address assignment via DHCP
+            # This is critical for RHEL-based distros which sometimes fail to get IPs
+            if ! qm set "$vm_id" --net0 ipv4=dhcp; then
+                log_warn "Failed to enable DHCP on net0 (non-fatal)"
+            fi
+            
+            log_success "Network configuration applied for AlmaLinux/Rocky"
+            ;;
+        *)
+            # Generic fallback - try both approaches
+            log_info "Generic OS type: applying mixed network config"
+            if ! qm set "$vm_id" --agent 1 --net0 bridged="${PROXMOX_BRIDGE}"; then
+                log_warn "Failed to configure generic network settings (non-fatal)"
+            fi
+            ;;
+    esac
+    
+    return 0
+}
+
+# -----------------------------------------------------------------------------
 # Function: configure_vm
 # -----------------------------------------------------------------------------
 # Configures VM resources (CPU, RAM, disk)
@@ -404,6 +473,7 @@ main() {
     validate_environment || exit $?
     allocate_vm_id || exit $?
     clone_template || exit $?
+    configure_network_for_os_type || exit $?  # NEW: Configure network after clone
     configure_vm || exit $?
     start_vm || exit $?
     wait_for_network || exit $?

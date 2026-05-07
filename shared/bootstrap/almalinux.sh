@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Linus Deployment Specialist - AlmaLinux Bootstrap Script
+# Linus Deployment Specialist - AlmaLinux Bootstrap Script (ENHANCED)
 # =============================================================================
-# Purpose: Initial OS-level setup for AlmaLinux 9.x
+# Purpose: Initial OS-level setup for AlmaLinux 9.x and Rocky Linux 9.x
 # Author: Linus Deployment Specialist (AI-generated)
-# Version: 1.1
+# Version: 1.2 (Enhanced with network fallback support)
 # Automation Level: 1 (Non-interactive design)
 #
 # Required Environment Variables: None (all have defaults)
@@ -14,6 +14,8 @@
 #   LOCALE              - System locale (default: en_US.UTF-8)
 #   INSTALL_EXTRAS      - Install optional packages (default: false)
 #   SKIP_UPGRADE        - Skip dnf upgrade step (default: false)
+#   NETWORK_INTERFACE   - Custom network interface name (default: ens3)
+#   BOOTSTAP_WAIT_TIME  - Wait time for cloud-init (default: 60 seconds)
 #
 # Usage:
 #   ./almalinux.sh
@@ -302,6 +304,118 @@ output_result() {
         "LOCALE:${LOCALE}" \
         "EXTRAS_INSTALLED:${INSTALL_EXTRAS}"
 }
+
+# =============================================================================
+# NEW: Enhanced network helper functions for AlmaLinux/Rocky cloud-init quirks
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Function: detect_network_interface
+# -----------------------------------------------------------------------------
+# Detects available network interface and returns name
+# Returns: Network interface name or ens3 (default)
+# -----------------------------------------------------------------------------
+
+detect_network_interface() {
+    local iface="${NETWORK_INTERFACE:-ens3}"
+    
+    log_info "Detecting network interface..."
+    
+    # Try to find first non-lo interface with IPv4 capability
+    local interfaces=$(ip -o link show | grep -v "lo:" | awk -F': ' '{print $2}' | tr -d '"' | head -1)
+    
+    if [[ -n "$interfaces" ]]; then
+        log_info "Detected network interface: ${interfaces}"
+        iface="$interfaces"
+    else
+        log_warn "Could not detect network interface, using default: ens3"
+    fi
+    
+    echo "$iface"
+}
+
+# -----------------------------------------------------------------------------
+# Function: get_vm_ip_address
+# -----------------------------------------------------------------------------
+# Multiple methods to get IP address (handles cloud-init timing issues)
+# Returns: IP address or empty string on failure
+# -----------------------------------------------------------------------------
+
+get_vm_ip_address() {
+    local max_attempts=10
+    local attempt=0
+    
+    log_info "Getting VM IP address..."
+    
+    while [[ $attempt -lt $max_attempts ]]; do
+        ((attempt++))
+        
+        # Method 1: Try nmcli (NetworkManager) - most reliable for RHEL-based
+        local ip=$(nmcli -g GENERAL.IP4.ADDRESS dev "${NETWORK_INTERFACE:-ens3}" 2>/dev/null | grep "192.168" | cut -d'/' -f1 | head -1)
+        
+        if [[ -n "$ip" ]]; then
+            log_info "IP detected via nmcli: ${ip}"
+            echo "$ip"
+            return 0
+        fi
+        
+        # Method 2: Try ip route - get default gateway's IP  
+        if [[ $attempt -eq 1 ]]; then
+            local ip=$(ip route | grep "default" | awk '{print $3}' | head -1)
+            if [[ "$ip" =~ ^192\.168 && -n "$ip" ]]; then
+                log_info "IP detected via ip route: ${ip}"
+                echo "$ip"
+                return 0
+            fi
+        fi
+        
+        # Method 3: Try cloud-init status for completed networking
+        local ci_status=$(cat /var/lib/cloud/instance/boot-finished 2>/dev/null && cat /var/lib/cloud/instance/networking/nw-config/default.yaml 2>/dev/null | grep "ipv4-addresses" | head -1 | sed 's/.*: \[//' | sed 's/\].*//')
+        if [[ -n "$ci_status" && "$ci_status" =~ ^192\.168 ]]; then
+            log_info "IP detected via cloud-init: ${ci_status}"
+            echo "$ci_status"
+            return 0
+        fi
+        
+        sleep 5
+    done
+    
+    log_warn "Could not detect IP address after ${max_attempts} attempts"
+    echo ""
+    return 1
+}
+
+# -----------------------------------------------------------------------------
+# Function: wait_for_network_ready
+# -----------------------------------------------------------------------------
+# Waits for network to be ready with timeout
+# Returns: 0 if ready, non-zero if timeout
+# -----------------------------------------------------------------------------
+
+wait_for_network_ready() {
+    local max_wait="${BOOTSTAP_WAIT_TIME:-60}"
+    local elapsed=0
+    
+    log_info "Waiting for network to be ready (${max_wait}s)..."
+    
+    while [[ $elapsed -lt $max_wait ]]; do
+        local ip=$(get_vm_ip_address)
+        
+        if [[ -n "$ip" ]]; then
+            log_success "Network is ready with IP: ${ip}"
+            return 0
+        fi
+        
+        sleep 5
+        ((elapsed+=5))
+        log_info "Waiting for network... (${elapsed}s/${max_wait}s)"
+    done
+    
+    log_warn "Network not fully ready within timeout (some operations may fail)"
+    return 1
+}
+
+# =============================================================================
 
 # -----------------------------------------------------------------------------
 # Main Function
