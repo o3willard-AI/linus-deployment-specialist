@@ -23,7 +23,7 @@ echo ""
 
 # All scripts to test
 scripts=(
-    "shared/provision/proxmox.sh"
+"shared/provision/proxmox.sh"
     "shared/provision/aws.sh"
     "shared/provision/qemu.sh"
     "shared/provision/destroy.sh"
@@ -47,6 +47,13 @@ scripts=(
     "examples/level1-example.sh"
     "examples/level2-example.sh"
     "examples/level3-example.sh"
+    "examples/pre-bootstrap-snapshot-example.sh"
+    "examples/cleanup-verification-example.sh"
+    "examples/resource-monitoring-example.sh"
+    "shared/snapshot/bootstrap-with-snapshot.sh"
+    "shared/snapshot/verify-cleanup.sh"
+    "shared/snapshot/monitor-resource.sh"
+
 )
 
 failed=0

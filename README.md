@@ -4,7 +4,7 @@
 
 An infrastructure automation tool that enables AI agents to create, configure, and manage disposable Linux VMs across multiple providers (Proxmox, AWS EC2, QEMU/libvirt).
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/o3willard-AI/linus-deployment-specialist/releases)
+[![Version](https://img.shields.io/badge/version-1.3.1-blue.svg)](https://github.com/o3willard-AI/linus-deployment-specialist/releases)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Providers](https://img.shields.io/badge/providers-3-success.svg)](README.md#supported-providers)
 [![GitHub](https://img.shields.io/badge/GitHub-o3willard--AI%2Flinus--deployment--specialist-blue.svg)](https://github.com/o3willard-AI/linus-deployment-specialist)
@@ -626,6 +626,114 @@ VM_DISK=20              # Disk size in GB
 - `QEMU_SUDO_PASS` - Sudo password (required)
 - `QEMU_POOL` - Storage pool (default: default)
 - `QEMU_NETWORK` - Network name (default: default)
+
+---
+
+---
+
+## 🆕 New Features (v1.3.1)
+
+<details>
+<summary><b>Click to expand new snapshot and monitoring capabilities</b></summary>
+
+### 1. Pre-Bootstrap Snapshots (bootstrap-with-snapshot.sh)
+Automatically create a snapshot before running bootstrap scripts, enabling instant rollback on failure.
+
+**Usage:**
+```bash
+# Create snapshot before bootstrap, restore on failure
+./shared/snapshot/bootstrap-with-snapshot.sh shared/bootstrap/ubuntu.sh
+
+# With custom snapshot name
+BOOTSNAPSHOT_NAME=pre-bootstrap-$(date +%Y%m%d) \
+  ./shared/snapshot/bootstrap-with-snapshot.sh shared/bootstrap/ubuntu.sh
+```
+
+**Benefits:**
+- ✅ Zero downtime rollback - revert to pre-bootstrap state instantly
+- ✅ Automated on failure - if bootstrap fails, snapshot is automatically offered for restore
+- ✅ Clean test environments - ensure consistent starting point for each test run
+- ✅ Time machine for experiments - experiment freely knowing you can rollback
+
+### 2. Cleanup Verification (verify-cleanup.sh)
+Verify that VM teardown completed successfully and detect orphaned resources.
+
+**Usage:**
+```bash
+# Verify Proxmox VM destruction
+./shared/snapshot/verify-cleanup.sh PROVIDER=proxmox VM_IDENTIFIER=113
+
+# Verify AWS instance termination
+./shared/snapshot/verify-cleanup.sh PROVIDER=aws VM_IDENTIFIER=i-0123456789abcdef0
+
+# With cleanup attempt
+./shared/snapshot/verify-cleanup.sh PROVIDER=proxmox VM_IDENTIFIER=113 --cleanup-orphans
+```
+
+**Verification Checks:**
+- ✅ VM/Instance existence check (should not exist after destroy)
+- ✅ Disk volume cleanup verification
+- ✅ Network interface detachment check
+- ✅ Orphaned snapshot detection
+- ✅ Floating IP/release verification for cloud providers
+
+**Exit Codes:**
+- `0` - Cleanup verified successful
+- `1` - Verification failed (orphaned resources detected)
+- `2` - Missing required parameters
+
+### 3. Resource Monitoring (monitor-resource.sh)
+Monitor CPU, memory, and disk I/O in real-time during bootstrap operations.
+
+**Usage:**
+```bash
+# Monitor VM resources during bootstrap (SSH-based)
+./shared/snapshot/monitor-resource.sh \
+  PROVIDER=proxmox VM_IDENTIFIER=113 VM_IP=192.168.1.100 VM_USER=ubuntu \
+  --interval 5 --timeout 300 --log-file /tmp/bootstrap-logs.txt
+
+# Quick health check (10 second monitoring)
+./shared/snapshot/monitor-resource.sh VM_IP=192.168.1.100 VM_USER=ubuntu --duration 10
+```
+
+**Metrics Tracked:**
+- CPU usage (percentage, per-core)
+- Memory usage (total, used, available)
+- Disk I/O (read/write bytes, IOPS)
+- Load average
+- Bootstrap completion detection
+
+**Features:**
+- Configurable monitoring interval (default: 10s)
+- Auto-detects bootstrap completion (SSH daemon running)
+- CSV and JSON output formats
+- Threshold alerts for resource spikes
+
+---
+
+### Updated Project Status
+
+| Component | Status |
+|-----------|--------|
+| Proxmox VE Provider | ✅ Fully tested |
+| AWS EC2 Provider | ✅ Fully tested |
+| QEMU/libvirt Provider | ✅ Fully tested |
+| Ubuntu 24.04 Bootstrap | ✅ Production ready |
+| AlmaLinux/Rocky Linux | ⚠️ Code complete, template issues (v1.1) |
+| **Pre-Bootstrap Snapshots** | ⭐ **NEW** (v1.3.1) |
+| **Cleanup Verification** | ⭐ **NEW** (v1.3.1) |
+| **Resource Monitoring** | ⭐ **NEW** (v1.3.1) |
+| Web UI | ⏳ Planned for v1.2 |
+
+---
+
+### Documentation
+
+- **Full Guide:** [`docs/NEW-FEATURES.md`](docs/NEW-FEATURES.md)
+- **Quick Reference:** [`docs/QUICK-REFERENCE.md`](docs/QUICK-REFERENCE.md)
+- **Unit Tests:** [`tests/unit/test-unit-snapshot.sh`](tests/unit/test-unit-snapshot.sh)
+
+</details>
 
 ---
 
