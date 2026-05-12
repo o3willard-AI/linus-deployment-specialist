@@ -48,9 +48,24 @@ IFS=$'\n\t'
 readonly SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Source libraries
-source "${SCRIPT_DIR}/../lib/logging.sh"
-source "${SCRIPT_DIR}/../lib/validation.sh"
+# Source libraries - try both paths for compatibility with test uploads
+if [[ -f "${SCRIPT_DIR}/../lib/logging.sh" ]]; then
+    source "${SCRIPT_DIR}/../lib/logging.sh"
+elif [[ -f "${SCRIPT_DIR}/lib/logging.sh" ]]; then
+    source "${SCRIPT_DIR}/lib/logging.sh"
+else
+    echo "ERROR: Cannot find logging.sh library" >&2
+    exit 1
+fi
+
+if [[ -f "${SCRIPT_DIR}/../lib/validation.sh" ]]; then
+    source "${SCRIPT_DIR}/../lib/validation.sh"
+elif [[ -f "${SCRIPT_DIR}/lib/validation.sh" ]]; then
+    source "${SCRIPT_DIR}/lib/validation.sh"
+else
+    echo "ERROR: Cannot find validation.sh library" >&2
+    exit 1
+fi
 
 # Configuration from environment with defaults
 readonly QEMU_HOST="${QEMU_HOST:-}"

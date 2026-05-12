@@ -156,7 +156,7 @@ cleanup() {
             -o UserKnownHostsFile=/dev/null \
             ${QEMU_SSH_KEY:+-i "$QEMU_SSH_KEY"} \
             "$QEMU_USER@$QEMU_HOST" \
-            "virsh destroy ${VM_NAME} 2>/dev/null || true; virsh undefine ${VM_NAME} 2>/dev/null || true" \
+            "echo '$QEMU_SUDO_PASS' | sudo -S virsh destroy ${VM_NAME} 2>/dev/null || true; echo '$QEMU_SUDO_PASS' | sudo -S virsh undefine ${VM_NAME} --remove-all-storage 2>/dev/null || true" \
             &>/dev/null || true
         
         echo -e "${GREEN}✅ Cleanup complete${NC}"
@@ -186,6 +186,26 @@ scp -o StrictHostKeyChecking=no \
     shared/lib/*.sh \
     "$QEMU_USER@$QEMU_HOST:/tmp/" || {
         echo -e "${RED}❌ Failed to upload provisioning script${NC}"
+        exit 1
+    }
+
+# Create lib directory structure on QEMU host for proper path resolution
+ssh -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    ${QEMU_SSH_KEY:+-i "$QEMU_SSH_KEY"} \
+    "$QEMU_USER@$QEMU_HOST" \
+    "mkdir -p /tmp/lib" || {
+        echo -e "${RED}❌ Failed to create lib directory on QEMU host${NC}"
+        exit 1
+    }
+
+# Upload lib files to the correct location
+scp -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    ${QEMU_SSH_KEY:+-i "$QEMU_SSH_KEY"} \
+    shared/lib/*.sh \
+    "$QEMU_USER@$QEMU_HOST:/tmp/lib/" || {
+        echo -e "${RED}❌ Failed to upload lib files${NC}"
         exit 1
     }
 
@@ -229,8 +249,8 @@ while [[ $attempt -lt $max_attempts ]]; do
     if ssh -o StrictHostKeyChecking=no \
            -o ConnectTimeout=5 \
            -o UserKnownHostsFile=/dev/null \
-           "$VM_USER@$VM_IP" \
-           "echo 'SSH ready'" &>/dev/null; then
+           "$QEMU_USER@$QEMU_HOST" \
+           "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $VM_USER@$VM_IP 'echo SSH ready'" &>/dev/null; then
         echo -e "${GREEN}✅ VM is ready for SSH${NC}"
         break
     fi
@@ -248,34 +268,37 @@ fi
 
 echo ""
 
+# ============================================================================= 
+# STEP 3-7: BOOTSTRAP, DEV TOOLS, BASE PACKAGES, VERIFY  
 # =============================================================================
-# STEP 3-7: BOOTSTRAP, DEV TOOLS, BASE PACKAGES, VERIFY
-# ==============================================================================
-# These steps are identical to the Proxmox test
-# See test-full-workflow.sh for the implementation
 
 echo -e "${YELLOW}[3/7]${NC} Bootstrapping Ubuntu..."
 
-# Upload bootstrap script
+# Upload bootstrap script using jump-host pattern
 ssh -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
-    "$VM_USER@$VM_IP" \
-    "mkdir -p /tmp/linus" || exit 1
+    ${QEMU_SSH_KEY:+-i "$QEMU_SSH_KEY"} \
+    "$QEMU_USER@$QEMU_HOST" \
+    "mkdir -p /tmp/linus-qemu" || exit 1
 
+# Upload bootstrap script and dependencies to QEMU host
 scp -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
+    ${QEMU_SSH_KEY:+-i "$QEMU_SSH_KEY"} \
     shared/bootstrap/ubuntu.sh \
     shared/lib/{logging.sh,validation.sh} \
-    "$VM_USER@$VM_IP:/tmp/linus/" || exit 1
+    "$QEMU_USER@$QEMU_HOST:/tmp/linus-qemu/" || exit 1
 
-if ! ssh -o StrictHostKeyChecking=no \
-         -o UserKnownHostsFile=/dev/null \
-         "$VM_USER@$VM_IP" \
-         "cd /tmp/linus && sudo bash ubuntu.sh" > /tmp/bootstrap-output.txt 2>&1; then
+# Copy to VM with proper directory structure
+ssh -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    ${QEMU_SSH_KEY:+-i "$QEMU_SSH_KEY"} \
+    "$QEMU_USER@$QEMU_HOST" \
+    "mkdir -p /tmp/linus/lib && cp /tmp/linus-qemu/ubuntu.sh /tmp/linus/ && cp /tmp/linus-qemu/*.sh /tmp/linus/lib/ 2>/dev/null; scp -r /tmp/linus/ $VM_USER@$VM_IP:/tmp/ && ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $VM_USER@$VM_IP 'cd /tmp/linus && sudo bash ubuntu.sh'" > /tmp/bootstrap-output.txt 2>&1 || {
     echo -e "${RED}❌ Bootstrap failed${NC}"
     cat /tmp/bootstrap-output.txt
     exit 1
-fi
+}
 
 if ! grep -q "LINUS_RESULT:SUCCESS" /tmp/bootstrap-output.txt; then
     echo -e "${RED}❌ Bootstrap did not return success${NC}"
@@ -285,17 +308,155 @@ fi
 echo -e "${GREEN}✅ Ubuntu bootstrapped${NC}"
 echo ""
 
-# Continue with dev-tools, base-packages, verification...
-# (Same pattern as Proxmox test - omitted for brevity)
+# ============================================================================= 
+# STEP 4: Install dev tools
+# =============================================================================
 
 echo -e "${YELLOW}[4/7]${NC} Installing development tools..."
+echo "  This will take 3-5 minutes (Docker installation)..."
+
+# Upload dev-tools script and dependencies using jump-host pattern
+scp -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    ${QEMU_SSH_KEY:+-i "$QEMU_SSH_KEY"} \
+    shared/configure/dev-tools.sh \
+    shared/lib/{noninteractive.sh,logging.sh,validation.sh} \
+    "$QEMU_USER@$QEMU_HOST:/tmp/linus-qemu/" || exit 1
+
+ssh -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    ${QEMU_SSH_KEY:+-i "$QEMU_SSH_KEY"} \
+    "$QEMU_USER@$QEMU_HOST" \
+    "mkdir -p /tmp/linus/lib && cp /tmp/linus-qemu/dev-tools.sh /tmp/linus/ && cp /tmp/linus-qemu/*.sh /tmp/linus/lib/ 2>/dev/null; scp -r /tmp/linus/ $VM_USER@$VM_IP:/tmp/ && ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $VM_USER@$VM_IP 'cd /tmp/linus && sudo bash dev-tools.sh'" > /tmp/dev-tools-output.txt 2>&1 || {
+    echo -e "${RED}❌ Dev tools installation failed${NC}"
+    echo "Output:"
+    cat /tmp/dev-tools-output.txt
+    exit 1
+}
+
+if ! grep -q "LINUS_RESULT:SUCCESS" /tmp/dev-tools-output.txt; then
+    echo -e "${RED}❌ Dev tools did not return success${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}✅ Dev tools installed${NC}"
+echo ""
+
+# ============================================================================= 
+# STEP 5: Install base packages
+# =============================================================================
+
 echo -e "${YELLOW}[5/7]${NC} Installing base packages..."
-echo -e "${YELLOW}[6/7]${NC} Verifying installations..."
+
+# Upload base-packages script and dependencies using jump-host pattern
+scp -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    ${QEMU_SSH_KEY:+-i "$QEMU_SSH_KEY"} \
+    shared/configure/base-packages.sh \
+    shared/lib/{logging.sh,validation.sh,noninteractive.sh} \
+    "$QEMU_USER@$QEMU_HOST:/tmp/linus-qemu/" || exit 1
+
+ssh -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    ${QEMU_SSH_KEY:+-i "$QEMU_SSH_KEY"} \
+    "$QEMU_USER@$QEMU_HOST" \
+    "mkdir -p /tmp/linus/lib && cp /tmp/linus-qemu/base-packages.sh /tmp/linus/ && cp /tmp/linus-qemu/*.sh /tmp/linus/lib/ 2>/dev/null; scp -r /tmp/linus/ $VM_USER@$VM_IP:/tmp/ && ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $VM_USER@$VM_IP 'cd /tmp/linus && sudo bash base-packages.sh'" > /tmp/base-packages-output.txt 2>&1 || {
+    echo -e "${RED}❌ Base packages installation failed${NC}"
+    echo "Output:"
+    cat /tmp/base-packages-output.txt
+    exit 1
+}
+
+if ! grep -q "LINUS_RESULT:SUCCESS" /tmp/base-packages-output.txt; then
+    echo -e "${RED}❌ Base packages did not return success${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}✅ Base packages installed${NC}"
+echo ""
+
+# ============================================================================= 
+# STEP 6: Verify installations
+# =============================================================================
+
+echo -e "${YELLOW}[6/7]${NC} Verifying all installations..."
+
+verification_checks=(
+    "curl --version:curl"
+    "git --version:git"
+    "python3 --version:Python"
+    "node --version:Node.js"
+    "docker --version:Docker"
+    "gcc --version:GCC"
+    "jq --version:jq"
+)
+
+failed_checks=()
+
+for check in "${verification_checks[@]}"; do
+    cmd="${check%%:*}"
+    name="${check##*:}"
+
+    if ssh -o StrictHostKeyChecking=no \
+           -o UserKnownHostsFile=/dev/null \
+           ${QEMU_SSH_KEY:+-i "$QEMU_SSH_KEY"} \
+           "$QEMU_USER@$QEMU_HOST" \
+           "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $VM_USER@$VM_IP '$cmd'" &>/dev/null; then
+        version=$(ssh -o StrictHostKeyChecking=no \
+                      -o UserKnownHostsFile=/dev/null \
+                      ${QEMU_SSH_KEY:+-i "$QEMU_SSH_KEY"} \
+                      "$QEMU_USER@$QEMU_HOST" \
+                      "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $VM_USER@$VM_IP '$cmd 2>&1 | head -1'")
+        echo -e "  ${GREEN}✅${NC} $name: ${version:0:50}"
+    else
+        echo -e "  ${RED}❌${NC} $name: NOT FOUND"
+        failed_checks+=("$name")
+    fi
+done
+
+if [[ ${#failed_checks[@]} -gt 0 ]]; then
+    echo -e "${RED}❌ Failed to verify: ${failed_checks[*]}${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}✅ All tools verified${NC}"
+echo ""
+
+# ============================================================================= 
+# STEP 7: Final system check
+# =============================================================================
+
 echo -e "${YELLOW}[7/7]${NC} Final system check..."
 
+# Check disk space using jump-host pattern
+disk_usage=$(ssh -o StrictHostKeyChecking=no \
+                 -o UserKnownHostsFile=/dev/null \
+                 ${QEMU_SSH_KEY:+-i "$QEMU_SSH_KEY"} \
+                 "$QEMU_USER@$QEMU_HOST" \
+                 "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $VM_USER@$VM_IP 'df -h / | tail -1 | awk \"{print \\$5}\"'")
+
+echo "  Disk usage: $disk_usage"
+
+# Check memory using jump-host pattern
+mem_total=$(ssh -o StrictHostKeyChecking=no \
+                -o UserKnownHostsFile=/dev/null \
+                ${QEMU_SSH_KEY:+-i "$QEMU_SSH_KEY"} \
+                "$QEMU_USER@$QEMU_HOST" \
+                "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $VM_USER@$VM_IP 'free -h | grep Mem | awk \"{print \\$2}\"'")
+
+echo "  Total memory: $mem_total"
+
+# Check running services using jump-host pattern
+services_running=$(ssh -o StrictHostKeyChecking=no \
+                       -o UserKnownHostsFile=/dev/null \
+                       ${QEMU_SSH_KEY:+-i "$QEMU_SSH_KEY"} \
+                       "$QEMU_USER@$QEMU_HOST" \
+                       "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $VM_USER@$VM_IP 'systemctl list-units --type=service --state=running | grep -c running'")
+
+echo "  Running services: $services_running"
+
+echo -e "${GREEN}✅ System check complete${NC}"
 echo ""
-echo -e "${GREEN}✅ QEMU E2E test steps 4-7 would execute here${NC}"
-echo "  (Same implementation as Proxmox test - see test-full-workflow.sh)"
 
 # =============================================================================
 # SUCCESS
@@ -312,7 +473,10 @@ echo "Test Summary:"
 echo "  ✅ QEMU VM provisioned (Name: $VM_NAME, IP: $VM_IP)"
 echo "  ✅ SSH connectivity verified"
 echo "  ✅ Ubuntu bootstrapped"
-echo "  (Remaining steps follow Proxmox test pattern)"
+echo "  ✅ Development tools installed"
+echo "  ✅ Base packages installed"
+echo "  ✅ All tools verified"
+echo "  ✅ System check passed"
 echo ""
 echo "VM will be destroyed in 5 seconds..."
 sleep 5
