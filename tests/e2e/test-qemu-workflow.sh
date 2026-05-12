@@ -267,7 +267,7 @@ ssh -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
     ${QEMU_SSH_KEY:+-i "$QEMU_SSH_KEY"} \
     "$QEMU_USER@$QEMU_HOST" \
-    "mkdir -p /tmp/linus/lib && cp /tmp/linus-qemu/ubuntu.sh /tmp/linus/ && cp /tmp/linus-qemu/*.sh /tmp/linus/lib/ 2>/dev/null; scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -r /tmp/linus/ $VM_USER@$VM_IP:/tmp/ && ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $VM_USER@$VM_IP 'cd /tmp/linus && sudo bash ubuntu.sh'" > /tmp/bootstrap-output.txt 2>&1 || {
+    "mkdir -p /tmp/linus/lib && cp /tmp/linus-qemu/ubuntu.sh /tmp/linus/ && cp /tmp/linus-qemu/*.sh /tmp/linus/lib/ 2>/dev/null; scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -r /tmp/linus/ $VM_USER@$VM_IP:/tmp/ && ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $VM_USER@$VM_IP 'mkdir -p /tmp/lib && cp /tmp/linus/lib/* /tmp/lib/ 2>/dev/null; cd /tmp/linus && sudo bash ubuntu.sh'" > /tmp/bootstrap-output.txt 2>&1 || {
     echo -e "${RED}❌ Bootstrap failed${NC}"
     cat /tmp/bootstrap-output.txt
     exit 1
@@ -300,7 +300,7 @@ ssh -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
     ${QEMU_SSH_KEY:+-i "$QEMU_SSH_KEY"} \
     "$QEMU_USER@$QEMU_HOST" \
-    "mkdir -p /tmp/linus/lib && cp /tmp/linus-qemu/dev-tools.sh /tmp/linus/ && cp /tmp/linus-qemu/*.sh /tmp/linus/lib/ 2>/dev/null; scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -r /tmp/linus/ $VM_USER@$VM_IP:/tmp/ && ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $VM_USER@$VM_IP 'cd /tmp/linus && sudo bash dev-tools.sh'" > /tmp/dev-tools-output.txt 2>&1 || {
+    "mkdir -p /tmp/linus/lib && cp /tmp/linus-qemu/dev-tools.sh /tmp/linus/ && cp /tmp/linus-qemu/*.sh /tmp/linus/lib/ 2>/dev/null; scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -r /tmp/linus/ $VM_USER@$VM_IP:/tmp/ && ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $VM_USER@$VM_IP 'mkdir -p /tmp/lib && cp /tmp/linus/lib/* /tmp/lib/ 2>/dev/null; cd /tmp/linus && sudo bash dev-tools.sh'" > /tmp/dev-tools-output.txt 2>&1 || {
     echo -e "${RED}❌ Dev tools installation failed${NC}"
     echo "Output:"
     cat /tmp/dev-tools-output.txt
@@ -333,7 +333,7 @@ ssh -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
     ${QEMU_SSH_KEY:+-i "$QEMU_SSH_KEY"} \
     "$QEMU_USER@$QEMU_HOST" \
-    "mkdir -p /tmp/linus/lib && cp /tmp/linus-qemu/base-packages.sh /tmp/linus/ && cp /tmp/linus-qemu/*.sh /tmp/linus/lib/ 2>/dev/null; scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -r /tmp/linus/ $VM_USER@$VM_IP:/tmp/ && ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $VM_USER@$VM_IP 'cd /tmp/linus && sudo bash base-packages.sh'" > /tmp/base-packages-output.txt 2>&1 || {
+    "mkdir -p /tmp/linus/lib && cp /tmp/linus-qemu/base-packages.sh /tmp/linus/ && cp /tmp/linus-qemu/*.sh /tmp/linus/lib/ 2>/dev/null; scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -r /tmp/linus/ $VM_USER@$VM_IP:/tmp/ && ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $VM_USER@$VM_IP 'mkdir -p /tmp/lib && cp /tmp/linus/lib/* /tmp/lib/ 2>/dev/null; cd /tmp/linus && sudo bash base-packages.sh'" > /tmp/base-packages-output.txt 2>&1 || {
     echo -e "${RED}❌ Base packages installation failed${NC}"
     echo "Output:"
     cat /tmp/base-packages-output.txt
