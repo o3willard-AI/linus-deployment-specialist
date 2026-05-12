@@ -50,7 +50,7 @@ echo ""
 QEMU_HOST="${QEMU_HOST:-192.168.101.59}"
 QEMU_USER="${QEMU_USER:-}"
 QEMU_SUDO_PASS="${QEMU_SUDO_PASS:-}"
-QEMU_SSH_KEY="${QEMU_SSH_KEY:-$HOME/.ssh/id_rsa}"
+QEMU_SSH_KEY="${QEMU_SSH_KEY:-$HOME/.ssh/id_ed25519_qemu_test}"
 QEMU_POOL="${QEMU_POOL:-default}"
 QEMU_NETWORK="${QEMU_NETWORK:-default}"
 VM_USER="ubuntu"
@@ -173,48 +173,18 @@ trap cleanup EXIT
 echo -e "${YELLOW}[1/7]${NC} Provisioning VM on QEMU/KVM..."
 echo "  This will take 2-5 minutes..."
 
-# Export variables for the provisioning script
+# Export variables for the provisioning script — run locally, not on QEMU host.
+# qemu.sh uses ssh_sudo()/ssh_exec() to connect to QEMU_HOST internally.
+export QEMU_HOST="$QEMU_HOST"
+export QEMU_USER="$QEMU_USER"
+export QEMU_SUDO_PASS="$QEMU_SUDO_PASS"
+export QEMU_SSH_KEY="$QEMU_SSH_KEY"
 export VM_CPU=2
 export VM_RAM=2048
 export VM_DISK=20
 
-# Upload provisioning script
-scp -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    ${QEMU_SSH_KEY:+-i "$QEMU_SSH_KEY"} \
-    shared/provision/qemu.sh \
-    shared/lib/*.sh \
-    "$QEMU_USER@$QEMU_HOST:/tmp/" || {
-        echo -e "${RED}❌ Failed to upload provisioning script${NC}"
-        exit 1
-    }
-
-# Create lib directory structure on QEMU host for proper path resolution
-ssh -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    ${QEMU_SSH_KEY:+-i "$QEMU_SSH_KEY"} \
-    "$QEMU_USER@$QEMU_HOST" \
-    "mkdir -p /tmp/lib" || {
-        echo -e "${RED}❌ Failed to create lib directory on QEMU host${NC}"
-        exit 1
-    }
-
-# Upload lib files to the correct location
-scp -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    ${QEMU_SSH_KEY:+-i "$QEMU_SSH_KEY"} \
-    shared/lib/*.sh \
-    "$QEMU_USER@$QEMU_HOST:/tmp/lib/" || {
-        echo -e "${RED}❌ Failed to upload lib files${NC}"
-        exit 1
-    }
-
-# Execute provisioning
-ssh -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    ${QEMU_SSH_KEY:+-i "$QEMU_SSH_KEY"} \
-    "$QEMU_USER@$QEMU_HOST" \
-    "cd /tmp && VM_CPU=2 VM_RAM=2048 VM_DISK=20 QEMU_SUDO_PASS='$QEMU_SUDO_PASS' bash qemu.sh" > /tmp/qemu-provision-output.txt 2>&1 || {
+# Execute provisioning script locally
+bash shared/provision/qemu.sh > /tmp/qemu-provision-output.txt 2>&1 || {
     echo -e "${RED}❌ VM provisioning failed${NC}"
     echo "Output:"
     cat /tmp/qemu-provision-output.txt
