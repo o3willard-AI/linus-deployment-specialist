@@ -406,7 +406,7 @@ disk_usage=$(ssh -o StrictHostKeyChecking=no \
                  -o UserKnownHostsFile=/dev/null \
                  ${QEMU_SSH_KEY:+-i "$QEMU_SSH_KEY"} \
                  "$QEMU_USER@$QEMU_HOST" \
-                 "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $VM_USER@$VM_IP 'df -h / | tail -1 | awk \"{print \\$5}\"'")
+                 "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $VM_USER@$VM_IP 'df -h / | tail -1 | awk \"{print \\\$5}\"'")
 
 echo "  Disk usage: $disk_usage"
 
@@ -415,7 +415,7 @@ mem_total=$(ssh -o StrictHostKeyChecking=no \
                 -o UserKnownHostsFile=/dev/null \
                 ${QEMU_SSH_KEY:+-i "$QEMU_SSH_KEY"} \
                 "$QEMU_USER@$QEMU_HOST" \
-                "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $VM_USER@$VM_IP 'free -h | grep Mem | awk \"{print \\$2}\"'")
+                 "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $VM_USER@$VM_IP 'free -h | grep Mem | awk \"{print \\\$2}\"'")
 
 echo "  Total memory: $mem_total"
 
