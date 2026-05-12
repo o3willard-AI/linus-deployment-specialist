@@ -105,36 +105,36 @@ cleanup() {
 trap cleanup EXIT
 
 # -----------------------------------------------------------------------------
+# Helper: authenticate SSH with key or password
+# -----------------------------------------------------------------------------
+
+_auth_ssh() {
+    if [[ -n "${QEMU_SSH_KEY:-}" && -f "$QEMU_SSH_KEY" ]]; then
+        ssh -i "$QEMU_SSH_KEY" "$@"
+    elif [[ -n "$QEMU_SUDO_PASS" ]]; then
+        sshpass -p "$QEMU_SUDO_PASS" ssh "$@"
+    else
+        ssh "$@"
+    fi
+}
+
+# -----------------------------------------------------------------------------
 # Function: ssh_sudo - Execute command on QEMU host with sudo
 # -----------------------------------------------------------------------------
 
 ssh_sudo() {
     local cmd="$1"
-    local ssh_prefix=""
-    if [[ -n "${QEMU_SSH_KEY:-}" && -f "$QEMU_SSH_KEY" ]]; then
-        ssh_prefix="ssh -i $QEMU_SSH_KEY"
-    elif [[ -n "$QEMU_SUDO_PASS" ]]; then
-        ssh_prefix="sshpass -p $QEMU_SUDO_PASS ssh"
-    else
-        ssh_prefix="ssh"
-    fi
     if [[ -n "$QEMU_SUDO_PASS" ]]; then
-        $ssh_prefix -o StrictHostKeyChecking=no "${QEMU_USER}@${QEMU_HOST}" \
+        _auth_ssh -o StrictHostKeyChecking=no "${QEMU_USER}@${QEMU_HOST}" \
             "echo '$QEMU_SUDO_PASS' | sudo -S bash -c '$cmd'"
     else
-        $ssh_prefix -o StrictHostKeyChecking=no "${QEMU_USER}@${QEMU_HOST}" "sudo bash -c '$cmd'"
+        _auth_ssh -o StrictHostKeyChecking=no "${QEMU_USER}@${QEMU_HOST}" "sudo bash -c '$cmd'"
     fi
 }
 
 ssh_exec() {
     local cmd="$1"
-    if [[ -n "${QEMU_SSH_KEY:-}" && -f "$QEMU_SSH_KEY" ]]; then
-        ssh -i "$QEMU_SSH_KEY" -o StrictHostKeyChecking=no "${QEMU_USER}@${QEMU_HOST}" "$cmd"
-    elif [[ -n "$QEMU_SUDO_PASS" ]]; then
-        sshpass -p "$QEMU_SUDO_PASS" ssh -o StrictHostKeyChecking=no "${QEMU_USER}@${QEMU_HOST}" "$cmd"
-    else
-        ssh -o StrictHostKeyChecking=no "${QEMU_USER}@${QEMU_HOST}" "$cmd"
-    fi
+    _auth_ssh -o StrictHostKeyChecking=no "${QEMU_USER}@${QEMU_HOST}" "$cmd"
 }
 
 # -----------------------------------------------------------------------------
