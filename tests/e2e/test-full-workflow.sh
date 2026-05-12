@@ -4,9 +4,8 @@
 # ==============================================================================
 
 echo -e "${YELLOW}[0/7]${NC} Running pre-flight provider check..."
-if ! bash scripts/check-provider.sh proxmox --host "$PROXMOX_HOST" --user "$PROXMOX_USER" 2>&1 | tee /tmp/preflight-output.txt; then
+if ! bash scripts/check-provider.sh proxmox --host "$PROXMOX_HOST" --user "$PROXMOX_USER"; then
     echo -e "${RED}❌ Pre-flight check failed — provider not ready${NC}"
-    cat /tmp/preflight-output.txt
     exit 1
 fi
 echo -e "${GREEN}✅ Pre-flight check passed${NC}"
@@ -18,7 +17,7 @@ echo ""
 # Purpose: Test complete workflow from VM creation to fully configured environment
 # Duration: ~8-10 minutes
 # Requirements: Proxmox host with SSH access, template VM configured
-# =============================================================================
+# ==============================================================================
 
 set -euo pipefail
 
@@ -37,12 +36,13 @@ echo ""
 
 # Configuration
 PROXMOX_HOST="${PROXMOX_HOST:-192.168.101.155}"
-PROXMOX_USER="${PROXMOX_USER:-root}"
-PROXMOX_SSH_KEY="${PROXMOX_SSH_KEY:-$HOME/.ssh/id_rsa}"
+PROXMOX_USER="${PROXMOX_USER:-root@pam}"
+PROXMOX_TOKEN_ID="${PROXMOX_TOKEN_ID:-linus-token}"
+PROXMOX_TOKEN_SECRET="${PROXMOX_TOKEN_SECRET:-}"
 
 echo "Configuration:"
 echo "  Proxmox: $PROXMOX_USER@$PROXMOX_HOST"
-echo "  SSH Key: $PROXMOX_SSH_KEY"
+echo "  API Token ID: $PROXMOX_TOKEN_ID"
 echo ""
 
 # Test variables (will be populated during execution)
@@ -50,16 +50,34 @@ VM_ID=""
 VM_IP=""
 VM_USER="ubuntu"
 
+# Check credentials function
+check_proxmox_credentials() {
+    if [[ -z "${PROXMOX_TOKEN_SECRET:-}" ]]; then
+        echo "❌ PROXMOX_TOKEN_SECRET is not set"
+        return 1
+    fi
+    # Test API
+    if ! curl -sk --connect-timeout 10 -H "Authorization: PVEAPIToken=${PROXMOX_USER}!${PROXMOX_TOKEN_ID}=${PROXMOX_TOKEN_SECRET}" "https://${PROXMOX_HOST}:8006/api2/json/version" >/dev/null 2>&1; then
+        echo "❌ Cannot connect to Proxmox API"
+        return 1
+    fi
+    echo "✅ Proxmox API connectivity verified"
+}
+
+# Verify credentials
+echo -e "${YELLOW}[0/7]${NC} Verifying credentials..."
+check_proxmox_credentials || exit 1
+
 # Cleanup function
 cleanup() {
     if [[ -n "${VM_ID}" ]]; then
         echo ""
         echo -e "${YELLOW}🧹 Cleaning up test VM ${VM_ID}...${NC}"
-        ssh -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            -i "$PROXMOX_SSH_KEY" \
-            "$PROXMOX_USER@$PROXMOX_HOST" \
-            "qm stop ${VM_ID} 2>/dev/null || true; qm destroy ${VM_ID} 2>/dev/null || true"
+        # Use API call instead of SSH to delete VM
+        curl -sk -X DELETE \
+            -H "Authorization: PVEAPIToken=${PROXMOX_USER}!${PROXMOX_TOKEN_ID}=${PROXMOX_TOKEN_SECRET}" \
+            "https://${PROXMOX_HOST}:8006/api2/json/nodes/${PROXMOX_NODE:-moxy}/qemu/${VM_ID}" \
+            -d 'destroy-unreferenced-disks=1' -d 'purge=1' 2>/dev/null || true
         echo -e "${GREEN}✅ Cleanup complete${NC}"
     fi
 }
@@ -71,32 +89,22 @@ trap cleanup EXIT
 echo -e "${YELLOW}[1/7]${NC} Provisioning VM on Proxmox..."
 echo "  This will take 1-2 minutes..."
 
-# Upload provisioning script
-if ! scp -o StrictHostKeyChecking=no \
-         -o UserKnownHostsFile=/dev/null \
-         -i "$PROXMOX_SSH_KEY" \
-         shared/provision/proxmox.sh \
-         shared/lib/*.sh \
-         "$PROXMOX_USER@$PROXMOX_HOST:/tmp/" 2>/dev/null; then
-    echo -e "${RED}❌ Failed to upload provisioning script${NC}"
-    exit 1
-fi
-
-# Execute provisioning
+# Export variables for local execution (since we're running locally now)
+export PROXMOX_HOST="$PROXMOX_HOST"
+export PROXMOX_USER="$PROXMOX_USER"
+export PROXMOX_TOKEN_ID="$PROXMOX_TOKEN_ID"
+export PROXMOX_TOKEN_SECRET="$PROXMOX_TOKEN_SECRET"
 export VM_CPU=2
 export VM_RAM=2048
 export VM_DISK=20
 
-if ! ssh -o StrictHostKeyChecking=no \
-         -o UserKnownHostsFile=/dev/null \
-         -i "$PROXMOX_SSH_KEY" \
-         "$PROXMOX_USER@$PROXMOX_HOST" \
-         "cd /tmp && VM_CPU=2 VM_RAM=2048 VM_DISK=20 bash proxmox.sh" > /tmp/provision-output.txt 2>&1; then
+# Run the provisioning script locally instead of uploading and executing via SSH
+bash shared/provision/proxmox.sh > /tmp/provision-output.txt 2>&1 || {
     echo -e "${RED}❌ VM provisioning failed${NC}"
     echo "Output:"
     cat /tmp/provision-output.txt
     exit 1
-fi
+}
 
 # Parse VM details from output
 VM_ID=$(grep "LINUS_VM_ID:" /tmp/provision-output.txt | cut -d: -f2 | tr -d ' ')

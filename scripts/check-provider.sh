@@ -249,68 +249,84 @@ _check_qemu() {
     return 0
 }
 
-# Check Proxmox provider environment (skeleton)
+# Check Proxmox provider environment
 _check_proxmox() {
     local host="$1"
     local user="$2"
+    local token_id="${3:-}"
+    local token_secret="${4:-}"
     
     log_header "Pre-Flight Check: Proxmox @ $host"
     
-    # Initialize counters
-    local checks_passed=0
-    local checks_warnings=0
-    local checks_failed=0
+    # Check if jq is available for JSON parsing
+    if ! command -v jq >/dev/null 2>&1; then
+        log_warn "jq not found — some checks may be limited"
+    fi
     
-    # Check 1: SSH connectivity
-    if _auth_ssh "$host" "true" "$user" 2>/dev/null; then
-        log_success "SSH connectivity"
+    local checks_passed=0 checks_warnings=0 checks_failed=0
+    local auth_header="Authorization: PVEAPIToken=${user}!${token_id}=${token_secret}"
+    local api_base="https://${host}:8006/api2/json"
+    
+    # Check 1: API connectivity
+    local version
+    version=$(curl -sk --connect-timeout 10 -H "$auth_header" "${api_base}/version" 2>/dev/null | jq -r '.data.version' 2>/dev/null)
+    if [[ -n "$version" ]]; then
+        log_success "Proxmox API $version"
         ((checks_passed++))
     else
-        log_error "SSH connectivity"
+        log_error "Cannot reach Proxmox API at $host:8006"
         ((checks_failed++))
         return 1
     fi
     
-    # Check 2: pvesh command availability
-    if _auth_ssh "$host" "command -v pvesh" "$user" 2>/dev/null; then
-        log_success "pvesh available"
+    # Check 2: Nodes
+    local nodes
+    nodes=$(curl -sk -H "$auth_header" "${api_base}/nodes" 2>/dev/null | jq -r '.data[].node' 2>/dev/null)
+    local node_count=$(echo "$nodes" | wc -l)
+    if [[ "$node_count" -gt 0 ]]; then
+        log_success "Nodes: $node_count available ($(echo $nodes | tr '\n' ' '))"
         ((checks_passed++))
     else
-        log_error "pvesh not found"
+        log_error "No nodes found"
         ((checks_failed++))
     fi
     
-    # Check 3: VM templates
-    local templates=$(_auth_ssh "$host" "pvesh create /nodes/$(hostname -s)/qemu/template/list | grep -c 'vmid'" "$user" 2>/dev/null)
-    if [[ "$templates" -gt 0 ]]; then
-        log_success "Found $templates VM template(s)"
+    # Get primary node name
+    local node=$(echo "$nodes" | head -1)
+    
+    # Check 3: VM templates (VMID >= 9000)
+    local templates
+    templates=$(curl -sk -H "$auth_header" "${api_base}/nodes/${node}/qemu" 2>/dev/null | jq -r '.data[] | select(.vmid >= 9000) | "\(.vmid):\(.name)"' 2>/dev/null)
+    local template_count=$(echo "$templates" | grep -c . 2>/dev/null || echo 0)
+    if [[ "$template_count" -gt 0 ]]; then
+        log_success "Templates: $template_count found"
         ((checks_passed++))
     else
-        log_warn "No VM templates found"
+        log_warn "No VM templates found (vmid >= 9000)"
         ((checks_warnings++))
     fi
     
     # Check 4: Storage with free space
-    local storage=$(_auth_ssh "$host" "pvesh create /nodes/$(hostname -s)/storage/list | grep -E 'size.*[0-9]' | head -1 | awk '{print \$2}'" "$user" 2>/dev/null)
+    local storage
+    storage=$(curl -sk -H "$auth_header" "${api_base}/nodes/${node}/storage" 2>/dev/null | jq -r '.data[] | select(.type=="lvmthin" or .type=="dir" or .type=="lvm") | "\(.storage):\(.type) \(.avail/1073741824|floor)GiB free"' 2>/dev/null)
     if [[ -n "$storage" ]]; then
-        log_success "Storage with free space available"
+        log_success "Storage: $(echo "$storage" | head -1)"
         ((checks_passed++))
     else
-        log_error "No storage with sufficient space found"
+        log_error "No suitable storage found"
         ((checks_failed++))
     fi
     
     # Summary
-    local total_checks=$((checks_passed + checks_warnings + checks_failed))
+    local total=$((checks_passed + checks_warnings + checks_failed))
     if [[ $checks_failed -eq 0 ]]; then
-        log_success "Result: $checks_passed/$total_checks passed, $checks_warnings warning(s)"
+        log_success "Result: $checks_passed/$total passed, $checks_warnings warning(s)"
         log_success "✅ Provider is ready for provisioning"
     else
-        log_error "Result: $checks_passed/$total_checks passed, $checks_warnings warning(s), $checks_failed failed"
+        log_error "Result: $checks_passed/$total passed, $checks_warnings warning(s), $checks_failed failed"
         log_error "❌ Provider has configuration issues"
         return 1
     fi
-    
     return 0
 }
 
@@ -452,7 +468,7 @@ main() {
                 exit 1
             fi
             
-            _check_proxmox "$host" "$user"
+            _check_proxmox "$host" "$user" "${PROXMOX_TOKEN_ID:-}" "${PROXMOX_TOKEN_SECRET:-}"
             ;;
         aws)
             local region=""
