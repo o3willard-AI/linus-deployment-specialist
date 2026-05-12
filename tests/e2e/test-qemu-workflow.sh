@@ -166,7 +166,20 @@ cleanup() {
 # Set trap for cleanup on exit
 trap cleanup EXIT
 
-# =============================================================================
+# ============================================================================= 
+# STEP 0: Pre-flight provider check
+# ==============================================================================
+
+echo -e "${YELLOW}[0/7]${NC} Running pre-flight provider check..."
+if ! bash scripts/check-provider.sh qemu --host "$QEMU_HOST" --user "$QEMU_USER" 2>&1 | tee /tmp/preflight-output.txt; then
+    echo -e "${RED}❌ Pre-flight check failed — provider not ready${NC}"
+    cat /tmp/preflight-output.txt
+    exit 1
+fi
+echo -e "${GREEN}✅ Pre-flight check passed${NC}"
+echo ""
+
+# ============================================================================= 
 # STEP 1: PROVISION VM
 # ==============================================================================
 

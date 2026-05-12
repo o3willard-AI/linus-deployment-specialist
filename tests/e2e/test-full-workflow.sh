@@ -1,7 +1,20 @@
 #!/usr/bin/env bash
-# =============================================================================
-# E2E Test: Full Provision + Bootstrap Workflow
-# =============================================================================
+# ============================================================================= 
+# STEP 0: Pre-flight provider check
+# ==============================================================================
+
+echo -e "${YELLOW}[0/7]${NC} Running pre-flight provider check..."
+if ! bash scripts/check-provider.sh proxmox --host "$PROXMOX_HOST" --user "$PROXMOX_USER" 2>&1 | tee /tmp/preflight-output.txt; then
+    echo -e "${RED}❌ Pre-flight check failed — provider not ready${NC}"
+    cat /tmp/preflight-output.txt
+    exit 1
+fi
+echo -e "${GREEN}✅ Pre-flight check passed${NC}"
+echo ""
+
+# ============================================================================= 
+# Step 1: Provision VM
+# ==============================================================================
 # Purpose: Test complete workflow from VM creation to fully configured environment
 # Duration: ~8-10 minutes
 # Requirements: Proxmox host with SSH access, template VM configured

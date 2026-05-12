@@ -1,0 +1,46 @@
+name: E2E Hardware Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: 'Provider to test'
+        required: true
+        type: choice
+        options: [qemu, proxmox, aws, all]
+        default: qemu
+  # Also trigger on pushes to master that modify provisioning scripts
+  push:
+    branches: [master]
+    paths:
+      - 'shared/provision/**'
+      - 'shared/lib/**'
+      - 'tests/e2e/**'
+
+jobs:
+  preflight:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pre-flight check
+        run: |
+          bash scripts/check-provider.sh ${{ inputs.provider || 'qemu' }} \
+            --host ${{ secrets.QEMU_HOST }} \
+            --user ${{ secrets.QEMU_USER }}
+        env:
+          QEMU_SUDO_PASS: ${{ secrets.QEMU_SUDO_PASS }}
+          QEMU_SSH_KEY: ${{ secrets.QEMU_SSH_KEY }}
+
+  e2e-test:
+    needs: preflight
+    runs-on: self-hosted
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run E2E test
+        run: bash tests/e2e/test-qemu-workflow.sh
+        env:
+          QEMU_HOST: ${{ secrets.QEMU_HOST }}
+          QEMU_USER: ${{ secrets.QEMU_USER }}
+          QEMU_SUDO_PASS: ${{ secrets.QEMU_SUDO_PASS }}
+          QEMU_SSH_KEY: ${{ secrets.QEMU_SSH_KEY }}
