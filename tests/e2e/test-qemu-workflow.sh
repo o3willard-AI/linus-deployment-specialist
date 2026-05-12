@@ -212,21 +212,23 @@ echo ""
 echo -e "${YELLOW}[2/7]${NC} Waiting for VM to be fully ready..."
 echo "  (QEMU cloud-init takes longer than other providers)..."
 
-# Cloud-init on QEMU can take 5-7 minutes
-max_attempts=90
+# Cloud-init on QEMU can take 5-7 minutes (15-20 min with software emulation / no KVM)
+max_attempts=300
 attempt=0
 while [[ $attempt -lt $max_attempts ]]; do
     if ssh -o StrictHostKeyChecking=no \
-           -o ConnectTimeout=5 \
+           -o ConnectTimeout=10 \
            -o UserKnownHostsFile=/dev/null \
            "$QEMU_USER@$QEMU_HOST" \
            "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $VM_USER@$VM_IP 'echo SSH ready'" &>/dev/null; then
-        echo -e "${GREEN}✅ VM is ready for SSH${NC}"
+        echo -e "${GREEN}✅ VM is ready for SSH (after $((attempt * 5 / 60)) min)${NC}"
         break
     fi
     
     attempt=$((attempt + 1))
-    echo "  Waiting... ($attempt/$max_attempts)"
+    if [[ $((attempt % 12)) -eq 0 ]]; then
+        echo "  Waiting... ($attempt/$max_attempts, ~$((attempt * 5 / 60)) min elapsed)"
+    fi
     sleep 5
 done
 
