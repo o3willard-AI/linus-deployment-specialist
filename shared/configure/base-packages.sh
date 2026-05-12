@@ -34,10 +34,9 @@ IFS=$'\n\t'
 readonly SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Source libraries
-source "${SCRIPT_DIR}/../lib/logging.sh"
-source "${SCRIPT_DIR}/../lib/validation.sh"
-source "${SCRIPT_DIR}/../lib/noninteractive.sh"
+# Source the unified library path resolver
+source "$SCRIPT_DIR/../lib/paths.sh" || exit 1
+source_lib "logging.sh" "validation.sh" "noninteractive.sh"
 
 # Configuration from environment with defaults
 readonly INSTALL_BUILD_TOOLS="${INSTALL_BUILD_TOOLS:-true}"

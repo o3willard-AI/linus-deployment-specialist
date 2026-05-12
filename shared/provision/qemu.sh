@@ -48,24 +48,9 @@ IFS=$'\n\t'
 readonly SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Source libraries - try both paths for compatibility with test uploads
-if [[ -f "${SCRIPT_DIR}/../lib/logging.sh" ]]; then
-    source "${SCRIPT_DIR}/../lib/logging.sh"
-elif [[ -f "${SCRIPT_DIR}/lib/logging.sh" ]]; then
-    source "${SCRIPT_DIR}/lib/logging.sh"
-else
-    echo "ERROR: Cannot find logging.sh library" >&2
-    exit 1
-fi
-
-if [[ -f "${SCRIPT_DIR}/../lib/validation.sh" ]]; then
-    source "${SCRIPT_DIR}/../lib/validation.sh"
-elif [[ -f "${SCRIPT_DIR}/lib/validation.sh" ]]; then
-    source "${SCRIPT_DIR}/lib/validation.sh"
-else
-    echo "ERROR: Cannot find validation.sh library" >&2
-    exit 1
-fi
+# Source the unified library path resolver
+source "$SCRIPT_DIR/../lib/paths.sh" || exit 1
+source_lib "logging.sh" "validation.sh"
 
 # Configuration from environment with defaults
 readonly QEMU_HOST="${QEMU_HOST:-}"
@@ -104,38 +89,8 @@ cleanup() {
 
 trap cleanup EXIT
 
-# -----------------------------------------------------------------------------
-# Helper: authenticate SSH with key or password
-# -----------------------------------------------------------------------------
-
-_auth_ssh() {
-    if [[ -n "${QEMU_SSH_KEY:-}" && -f "$QEMU_SSH_KEY" ]]; then
-        ssh -i "$QEMU_SSH_KEY" "$@"
-    elif [[ -n "$QEMU_SUDO_PASS" ]]; then
-        sshpass -p "$QEMU_SUDO_PASS" ssh "$@"
-    else
-        ssh "$@"
-    fi
-}
-
-# -----------------------------------------------------------------------------
-# Function: ssh_sudo - Execute command on QEMU host with sudo
-# -----------------------------------------------------------------------------
-
-ssh_sudo() {
-    local cmd="$1"
-    if [[ -n "$QEMU_SUDO_PASS" ]]; then
-        _auth_ssh -o StrictHostKeyChecking=no "${QEMU_USER}@${QEMU_HOST}" \
-            "echo '$QEMU_SUDO_PASS' | sudo -S bash -c '$cmd'"
-    else
-        _auth_ssh -o StrictHostKeyChecking=no "${QEMU_USER}@${QEMU_HOST}" "sudo bash -c '$cmd'"
-    fi
-}
-
-ssh_exec() {
-    local cmd="$1"
-    _auth_ssh -o StrictHostKeyChecking=no "${QEMU_USER}@${QEMU_HOST}" "$cmd"
-}
+# Source shared SSH authentication (provides ssh_exec, ssh_sudo, _auth_ssh)
+source_lib "ssh-auth.sh" || exit 1
 
 # -----------------------------------------------------------------------------
 # Function: validate_environment
@@ -158,8 +113,8 @@ validate_environment() {
     # Check dependencies
     check_dependencies ssh sshpass || return 2
 
-    # Test SSH connection
-    if ! ssh_exec "echo SSH OK" >/dev/null 2>&1; then
+    # Test SSH connection (uses key→password→bare fallback from ssh-auth.sh)
+    if ! ssh_check; then
         log_error "Cannot connect to QEMU host: ${QEMU_HOST}"
         return 4
     fi

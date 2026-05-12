@@ -50,7 +50,7 @@ scripts=(
     "shared/snapshot/bootstrap-with-snapshot.sh"
     "shared/snapshot/verify-cleanup.sh"
     "shared/snapshot/monitor-resource.sh"
-
+    "scripts/check-provider.sh"
 )
 
 failed=0
