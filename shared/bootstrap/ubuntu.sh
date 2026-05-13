@@ -100,6 +100,54 @@ validate_environment() {
 }
 
 # -----------------------------------------------------------------------------
+# Function: ensure_dns
+# -----------------------------------------------------------------------------
+# Ensures DNS resolution works before attempting network operations.
+# Cloud-init on Proxmox sometimes fails to configure DNS servers, leaving
+# /etc/resolv.conf empty or with only localhost. This adds fallback nameservers
+# so apt-get update and other network operations succeed.
+# Returns: 0 on success (DNS is now working), 1 if unrecoverable
+# -----------------------------------------------------------------------------
+
+ensure_dns() {
+    log_step "1a" "Ensuring DNS resolution"
+
+    # If we can already resolve, we're done
+    if getent hosts google.com >/dev/null 2>&1 || getent hosts archive.ubuntu.com >/dev/null 2>&1; then
+        log_success "DNS already working"
+        return 0
+    fi
+
+    log_info "DNS not working — adding fallback nameservers"
+
+    # Try adding nameservers to resolv.conf
+    if [[ -f /etc/resolv.conf ]]; then
+        # Remove any existing nameserver lines and recreate
+        local tmp_resolv
+        tmp_resolv=$(grep -v '^nameserver' /etc/resolv.conf 2>/dev/null || true)
+        {
+            echo "$tmp_resolv"
+            echo "nameserver 8.8.8.8"
+            echo "nameserver 1.1.1.1"
+        } > /etc/resolv.conf 2>/dev/null || {
+            # Fallback: systemd-resolved
+            if command -v resolvectl &>/dev/null; then
+                resolvectl dns eth0 8.8.8.8 1.1.1.1 2>/dev/null || true
+            fi
+        }
+    fi
+
+    # Verify fix worked
+    if getent hosts archive.ubuntu.com >/dev/null 2>&1; then
+        log_success "DNS configured (fallback nameservers)"
+        return 0
+    fi
+
+    log_error "DNS still not working after fallback"
+    return 1
+}
+
+# -----------------------------------------------------------------------------
 # Function: update_package_cache
 # -----------------------------------------------------------------------------
 
@@ -314,6 +362,7 @@ main() {
     log_header "Linus Ubuntu Bootstrap"
 
     validate_environment || exit $?
+    ensure_dns || exit $?
     update_package_cache || exit $?
     upgrade_packages || exit $?
     install_essential_packages || exit $?
