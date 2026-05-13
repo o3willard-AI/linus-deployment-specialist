@@ -321,7 +321,7 @@ configure_network_for_os_type() {
         ubuntu|debian)
             # Ubuntu/Debian - configure static IP (no DHCP on vmbr0)
             log_info "Ubuntu/Debian: Configuring static IP ${ALLOCATED_VM_IP}/24 gw ${GATEWAY_IP}"
-            if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id} \
+            if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
                 --data-raw "{\"agent\":1,\"ipconfig0\":\"ip=${ALLOCATED_VM_IP}/24,gw=${GATEWAY_IP}\"}" >/dev/null 2>&1; then
                 log_warn "Failed to configure static IP (non-fatal)"
             fi
@@ -331,37 +331,37 @@ configure_network_for_os_type() {
             log_info "AlmaLinux/Rocky: Applying custom cloud-init network config"
             
             # Set VM OS type for Libvirt/QEMU agent to recognize as Linux
-            if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id} \
+            if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
                 --data-raw "{\"osinfo\":\"AlmaLinux 9\"}" >/dev/null 2>&1 && \
-               ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id} \
+               ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
                 --data-raw "{\"osinfo\":\"Rocky Linux 9\"}" >/dev/null 2>&1; then
                 # Try with generic linux for compatibility
-                _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id} \
+                _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
                     --data-raw "{\"osinfo\":\"Linux\"}" >/dev/null 2>&1 || true
             fi
             
             # Enable QEMU guest agent for network discovery
-            if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id} \
+            if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
                 --data-raw "{\"agent\":1,\"agent-xpra\":0}" >/dev/null 2>&1; then
                 log_warn "Failed to configure QEMU agent (non-fatal)"
             fi
             
             # Configure network0 with explicit bridge settings
-            if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id} \
+            if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
                 --data-raw "{\"net0\":\"model=virtio,bridge=${PROXMOX_BRIDGE},connect=on,network=default\"}" >/dev/null 2>&1; then
                 log_warn "Failed to configure net0 bridge (using default: ${PROXMOX_BRIDGE})"
             fi
             
             # For RHEL-based distros, add cloud-init specific settings
             # This helps with dhcp and network configuration timing
-            if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id} \
+            if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
                 --data-raw "{\"ciuser\":\"root\"}" >/dev/null 2>&1; then
                 log_warn "CIUser not explicitly set (non-fatal)"
             fi
             
             # Set up for automatic IP address assignment via DHCP
             # This is critical for RHEL-based distros which sometimes fail to get IPs
-            if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id} \
+            if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
                 --data-raw "{\"net0\":\"ipv4=dhcp\"}" >/dev/null 2>&1; then
                 log_warn "Failed to enable DHCP on net0 (non-fatal)"
             fi
@@ -371,7 +371,7 @@ configure_network_for_os_type() {
         *)
             # Generic fallback - try both approaches
             log_info "Generic OS type: applying mixed network config"
-            if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id} \
+            if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
                 --data-raw "{\"agent\":1,\"net0\":\"bridge=${PROXMOX_BRIDGE}\"}" >/dev/null 2>&1; then
                 log_warn "Failed to configure generic network settings (non-fatal)"
             fi
@@ -396,7 +396,7 @@ configure_vm() {
 
     # Set CPU and RAM
     log_info "Setting CPU: ${VM_CPU} cores, RAM: ${VM_RAM} MB..."
-    if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id} \
+    if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
         --data-raw "{\"cores\":${VM_CPU},\"memory\":${VM_RAM}}" >/dev/null 2>&1; then
         log_error "Failed to set CPU/RAM"
         return 5
@@ -404,7 +404,7 @@ configure_vm() {
 
     # Resize disk
     log_info "Resizing disk to ${VM_DISK}G..."
-    if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id} \
+    if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
         --data-raw "{\"disk\": \"scsi0=${PROXMOX_STORAGE}:${VM_DISK}G\"}" >/dev/null 2>&1; then
         log_error "Failed to resize disk"
         return 5
@@ -413,7 +413,7 @@ configure_vm() {
     # Configure SSH key access
     log_info "Configuring SSH key access..."
     if [[ -f /root/.ssh/id_rsa.pub ]]; then
-        if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id} \
+        if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
             --data-raw "{\"sshkey\": \"/root/.ssh/id_rsa.pub\"}" >/dev/null 2>&1; then
             log_error "Failed to configure SSH key"
             return 5
