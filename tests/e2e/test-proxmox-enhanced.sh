@@ -73,10 +73,12 @@ cleanup() {
     if [[ -n "${VM_ID}" ]]; then
         echo ""
         echo -e "${YELLOW}🧹 Cleaning up test VM ${VM_ID}...${NC}"
-        # Use API call instead of SSH to delete VM
+        # Stop first, then delete with query params (-d gets HTTP 501 on DELETE)
+        _api -X POST \
+            "https://${PROXMOX_HOST}:8006/api2/json/nodes/${PROXMOX_NODE:-moxy}/qemu/${VM_ID}/status/stop" 2>/dev/null || true
+        sleep 3
         _api -X DELETE \
-            "https://${PROXMOX_HOST}:8006/api2/json/nodes/${PROXMOX_NODE:-moxy}/qemu/${VM_ID}" \
-            -d 'destroy-unreferenced-disks=1' -d 'purge=1' 2>/dev/null || true
+            "https://${PROXMOX_HOST}:8006/api2/json/nodes/${PROXMOX_NODE:-moxy}/qemu/${VM_ID}?destroy-unreferenced-disks=1&purge=1" 2>/dev/null || true
         echo -e "${GREEN}✅ Cleanup complete${NC}"
     fi
     
@@ -87,9 +89,11 @@ cleanup() {
         IFS=',' read -ra VM_ARRAY <<< "${MULTI_VM_IDS}"
         for id in "${VM_ARRAY[@]}"; do
             if [[ -n "$id" ]]; then
+                _api -X POST \
+                    "https://${PROXMOX_HOST}:8006/api2/json/nodes/${PROXMOX_NODE:-moxy}/qemu/${id}/status/stop" 2>/dev/null || true
+                sleep 2
                 _api -X DELETE \
-                    "https://${PROXMOX_HOST}:8006/api2/json/nodes/${PROXMOX_NODE:-moxy}/qemu/${id}" \
-                    -d 'destroy-unreferenced-disks=1' -d 'purge=1' 2>/dev/null || true
+                    "https://${PROXMOX_HOST}:8006/api2/json/nodes/${PROXMOX_NODE:-moxy}/qemu/${id}?destroy-unreferenced-disks=1&purge=1" 2>/dev/null || true
             fi
         done
         echo -e "${GREEN}✅ Multi-VM cleanup complete${NC}"
@@ -159,23 +163,23 @@ echo -e "${GREEN}✅ VM ready${NC}"
 # Step 3: Bootstrap Ubuntu (direct SSH — no jump-host)
 echo -e "${YELLOW}[3/7]${NC} Bootstrapping Ubuntu..."
 
-# Define common SSH options
-readonly SSH_OPTS="-i ${SSH_KEY_FILE} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=10"
+# Define common SSH options as an array (IFS is set to $'\n\t', not space!)
+readonly SSH_OPTS=(-i "${SSH_KEY_FILE}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=10)
 
 # Create working directory on VM
-ssh ${SSH_OPTS} ubuntu@$VM_IP "mkdir -p /tmp/linus" 2>/dev/null || {
-    echo -e "${RED}❌ Failed to create directory on VM${NC}"
+if ! ssh "${SSH_OPTS[@]}" ubuntu@$VM_IP "mkdir -p /tmp/linus" 2>&1; then
+    echo -e "${RED}❌ Failed to create directory on VM (SSH_KEY_FILE=${SSH_KEY_FILE})${NC}"
     exit 1
-}
+fi
 
 # Upload bootstrap scripts directly
-scp ${SSH_OPTS} shared/bootstrap/ubuntu.sh shared/lib/logging.sh shared/lib/validation.sh ubuntu@$VM_IP:/tmp/linus/ 2>/dev/null || {
+scp ${SSH_OPTS[@]} shared/bootstrap/ubuntu.sh shared/lib/logging.sh shared/lib/validation.sh ubuntu@$VM_IP:/tmp/linus/ 2>/dev/null || {
     echo -e "${RED}❌ Failed to upload bootstrap script${NC}"
     exit 1
 }
 
 # Execute bootstrap
-if ! ssh ${SSH_OPTS} ubuntu@$VM_IP \
+if ! ssh ${SSH_OPTS[@]} ubuntu@$VM_IP \
      "cd /tmp/linus && sudo bash ubuntu.sh" > /tmp/bootstrap-output.txt 2>&1; then
     echo -e "${RED}❌ Bootstrap failed${NC}"
     echo "Output:"
@@ -195,13 +199,13 @@ echo -e "${YELLOW}[4/7]${NC} Installing development tools..."
 echo "  This will take 3-5 minutes (Docker installation)..."
 
 # Upload dev-tools script
-scp ${SSH_OPTS} shared/configure/dev-tools.sh shared/lib/noninteractive.sh ubuntu@$VM_IP:/tmp/linus/ 2>/dev/null || {
+scp ${SSH_OPTS[@]} shared/configure/dev-tools.sh shared/lib/noninteractive.sh ubuntu@$VM_IP:/tmp/linus/ 2>/dev/null || {
     echo -e "${RED}❌ Failed to upload dev-tools script${NC}"
     exit 1
 }
 
 # Execute dev-tools installation
-if ! ssh ${SSH_OPTS} ubuntu@$VM_IP \
+if ! ssh ${SSH_OPTS[@]} ubuntu@$VM_IP \
      "cd /tmp/linus && sudo bash dev-tools.sh" > /tmp/dev-tools-output.txt 2>&1; then
     echo -e "${RED}❌ Dev tools installation failed${NC}"
     echo "Output:"
@@ -219,12 +223,12 @@ echo -e "${GREEN}✅ Dev tools installed${NC}"
 # Step 5: Install base packages (direct SSH)
 echo -e "${YELLOW}[5/7]${NC} Installing base packages..."
 
-scp ${SSH_OPTS} shared/configure/base-packages.sh ubuntu@$VM_IP:/tmp/linus/ 2>/dev/null || {
+scp ${SSH_OPTS[@]} shared/configure/base-packages.sh ubuntu@$VM_IP:/tmp/linus/ 2>/dev/null || {
     echo -e "${RED}❌ Failed to upload base-packages script${NC}"
     exit 1
 }
 
-if ! ssh ${SSH_OPTS} ubuntu@$VM_IP \
+if ! ssh ${SSH_OPTS[@]} ubuntu@$VM_IP \
      "cd /tmp/linus && sudo bash base-packages.sh" > /tmp/base-packages-output.txt 2>&1; then
     echo -e "${RED}❌ Base packages installation failed${NC}"
     echo "Output:"
@@ -258,8 +262,8 @@ for check in "${verification_checks[@]}"; do
     cmd="${check%%:*}"
     name="${check##*:}"
 
-    if ssh ${SSH_OPTS} ubuntu@$VM_IP "$cmd" &>/dev/null; then
-        version=$(ssh ${SSH_OPTS} ubuntu@$VM_IP "$cmd 2>&1 | head -1")
+    if ssh ${SSH_OPTS[@]} ubuntu@$VM_IP "$cmd" &>/dev/null; then
+        version=$(ssh ${SSH_OPTS[@]} ubuntu@$VM_IP "$cmd 2>&1 | head -1")
         echo -e "  ${GREEN}✅${NC} $name: ${version:0:50}"
     else
         echo -e "  ${RED}❌${NC} $name: NOT FOUND"
@@ -278,15 +282,15 @@ echo -e "${GREEN}✅ All tools verified${NC}"
 echo -e "${YELLOW}[7/7]${NC} Final system check..."
 
 # Check disk space
-disk_usage=$(ssh ${SSH_OPTS} ubuntu@$VM_IP "df -h / | tail -1 | awk '{print \$5}'")
+disk_usage=$(ssh ${SSH_OPTS[@]} ubuntu@$VM_IP "df -h / | tail -1 | awk '{print \$5}'")
 echo "  Disk usage: $disk_usage"
 
 # Check memory
-mem_total=$(ssh ${SSH_OPTS} ubuntu@$VM_IP "free -h | grep Mem | awk '{print \$2}'")
+mem_total=$(ssh ${SSH_OPTS[@]} ubuntu@$VM_IP "free -h | grep Mem | awk '{print \$2}'")
 echo "  Total memory: $mem_total"
 
 # Check running services
-services_running=$(ssh ${SSH_OPTS} ubuntu@$VM_IP "systemctl list-units --type=service --state=running | grep -c running")
+services_running=$(ssh ${SSH_OPTS[@]} ubuntu@$VM_IP "systemctl list-units --type=service --state=running | grep -c running")
 echo "  Running services: $services_running"
 
 echo -e "${GREEN}✅ System check complete${NC}"
@@ -315,21 +319,21 @@ echo -e "${GREEN}✅ Snapshot 'pre-workload' saved${NC}"
 echo -e "${YELLOW}[9/12]${NC} Running workload..."
 
 # Install nginx directly
-ssh ${SSH_OPTS} ubuntu@$VM_IP \
+ssh ${SSH_OPTS[@]} ubuntu@$VM_IP \
     "sudo apt-get update -qq && sudo apt-get install -y -qq nginx" 2>/dev/null || {
     echo -e "${RED}❌ Failed to install nginx${NC}"
     exit 1
 }
 
 # Create test data directly
-ssh ${SSH_OPTS} ubuntu@$VM_IP \
+ssh ${SSH_OPTS[@]} ubuntu@$VM_IP \
     "echo \"SNAPSHOT TEST DATA\" | sudo tee /var/www/html/test.txt" 2>/dev/null || {
     echo -e "${RED}❌ Failed to create test data${NC}"
     exit 1
 }
 
 # Verify nginx is working directly
-ssh ${SSH_OPTS} ubuntu@$VM_IP \
+ssh ${SSH_OPTS[@]} ubuntu@$VM_IP \
     "curl -s http://localhost/test.txt" 2>/dev/null || {
     echo -e "${RED}❌ Failed to verify nginx installation${NC}"
     exit 1
@@ -349,7 +353,7 @@ echo -e "${GREEN}✅ Snapshot 'pre-workload' restored${NC}"
 echo -e "${YELLOW}[11/12]${NC} Verifying snapshot restore..."
 
 # Check if nginx is removed after rollback
-nginx_check=$(ssh ${SSH_OPTS} ubuntu@$VM_IP "which nginx" 2>/dev/null || echo "")
+nginx_check=$(ssh ${SSH_OPTS[@]} ubuntu@$VM_IP "which nginx" 2>/dev/null || echo "")
 if [[ -n "$nginx_check" ]]; then
     echo -e "${RED}❌ Nginx should have been removed after restore${NC}"
     exit 1
@@ -361,7 +365,7 @@ echo -e "${GREEN}✅ Nginx correctly removed by snapshot restore${NC}"
 echo -e "${YELLOW}[12/12]${NC} Verifying base tools after restore..."
 
 for tool in curl git python3; do
-    if ssh ${SSH_OPTS} ubuntu@$VM_IP "which $tool" &>/dev/null; then
+    if ssh ${SSH_OPTS[@]} ubuntu@$VM_IP "which $tool" &>/dev/null; then
         echo -e "  ${GREEN}✅${NC} $tool is present"
     else
         echo -e "  ${RED}❌${NC} $tool is missing"
@@ -473,13 +477,13 @@ for i in {1..2}; do
 done
 
 # Test DNS resolution between VMs via direct SSH
-if ! ssh ${SSH_OPTS} ubuntu@$VM_IP \
+if ! ssh ${SSH_OPTS[@]} ubuntu@$VM_IP \
      "getent hosts test-cluster-1 || ping -c1 $VM2_IP" 2>/dev/null; then
     echo -e "${RED}❌ DNS resolution failed between VMs${NC}"
     exit 1
 fi
 
-if ! ssh ${SSH_OPTS} ubuntu@$VM2_IP \
+if ! ssh ${SSH_OPTS[@]} ubuntu@$VM2_IP \
      "getent hosts test-cluster-2 || ping -c1 $VM3_IP" 2>/dev/null; then
     echo -e "${RED}❌ DNS resolution failed between VMs${NC}"
     exit 1
@@ -510,12 +514,12 @@ echo -e "${GREEN}✅ Phase 4 started${NC}"
 echo -e "${YELLOW}[17/19]${NC} Running resource monitoring with load test..."
 
 # Start monitoring in background via direct SSH
-ssh ${SSH_OPTS} ubuntu@$VM_IP "sudo bash /tmp/monitor-resource.sh &" 2>/dev/null &
+ssh ${SSH_OPTS[@]} ubuntu@$VM_IP "sudo bash /tmp/monitor-resource.sh &" 2>/dev/null &
 
 # Run a stress test (dd command) via direct SSH
 echo -e "${YELLOW}[17/19]${NC} Running stress test..."
 
-ssh ${SSH_OPTS} ubuntu@$VM_IP "dd if=/dev/zero of=/tmp/testfile bs=1M count=500 2>/dev/null &" &
+ssh ${SSH_OPTS[@]} ubuntu@$VM_IP "dd if=/dev/zero of=/tmp/testfile bs=1M count=500 2>/dev/null &" &
 
 # Give the monitoring a moment to start
 sleep 5
