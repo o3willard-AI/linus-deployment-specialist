@@ -330,10 +330,10 @@ configure_network_for_os_type() {
     case "$os_type" in
         ubuntu|debian)
             # Ubuntu/Debian - configure static IP (no DHCP on vmbr0)
-            log_info "Ubuntu/Debian: Configuring static IP ${ALLOCATED_VM_IP}/24 gw ${GATEWAY_IP}"
+            log_info "Ubuntu/Debian: Configuring static IP ${ALLOCATED_VM_IP}/24 gw ${GATEWAY_IP} dns ${GATEWAY_IP},8.8.8.8"
             if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
-                --data-raw "{\"agent\":1,\"ipconfig0\":\"ip=${ALLOCATED_VM_IP}/24,gw=${GATEWAY_IP}\"}" >/dev/null 2>&1; then
-                log_warn "Failed to configure static IP (non-fatal)"
+                --data-raw "{\"agent\":1,\"ipconfig0\":\"ip=${ALLOCATED_VM_IP}/24,gw=${GATEWAY_IP},dns=${GATEWAY_IP},8.8.8.8\"}" >/dev/null 2>&1; then
+                log_warn "Failed to configure static IP + DNS (non-fatal)"
             fi
             ;;
         almalinux|rocky)
