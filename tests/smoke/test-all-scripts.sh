@@ -51,6 +51,7 @@ scripts=(
     "shared/snapshot/verify-cleanup.sh"
     "shared/snapshot/monitor-resource.sh"
     "scripts/check-provider.sh"
+    "tests/e2e/test-proxmox-enhanced.sh"
 )
 
 failed=0
