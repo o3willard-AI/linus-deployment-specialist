@@ -79,10 +79,10 @@ _pvesh() {
             curl -sk -H "$auth_header" "$url" "$@" 2>/dev/null
             ;;
         post)
-            curl -sk -X POST -H "$auth_header" -H "Content-Type: application/json" "$url" "$@" 2>/dev/null
+            curl -sk --fail -X POST -H "$auth_header" -H "Content-Type: application/json" "$url" "$@" 2>/dev/null
             ;;
         put)
-            curl -sk -X PUT -H "$auth_header" -H "Content-Type: application/json" "$url" "$@" 2>/dev/null
+            curl -sk --fail -X PUT -H "$auth_header" -H "Content-Type: application/json" "$url" "$@" 2>/dev/null
             ;;
         delete)
             curl -sk -X DELETE -H "$auth_header" "$url" "$@" 2>/dev/null
@@ -450,6 +450,8 @@ configure_vm() {
 regenerate_cloudinit() {
     local vm_id="$ALLOCATED_VM_ID"
     log_info "Regenerating cloud-init ISO with final config..."
+    # Small delay to ensure all config changes are committed before regeneration
+    sleep 2
     if _pvesh post /nodes/${PROXMOX_NODE}/qemu/${vm_id}/cloudinit >/dev/null 2>&1; then
         log_info "Cloud-init ISO regenerated for VM ${vm_id}"
         return 0
