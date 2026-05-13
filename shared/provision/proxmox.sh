@@ -412,14 +412,26 @@ configure_vm() {
 
     # Configure SSH key access
     log_info "Configuring SSH key access..."
-    if [[ -f /root/.ssh/id_rsa.pub ]]; then
+    local ssh_key_file=""
+    for candidate in ~/.ssh/id_ed25519_qemu_test.pub ~/.ssh/id_ed25519.pub ~/.ssh/id_rsa.pub; do
+        if [[ -f "$candidate" ]]; then
+            ssh_key_file="$candidate"
+            break
+        fi
+    done
+    
+    if [[ -n "$ssh_key_file" ]]; then
+        local ssh_key_content
+        ssh_key_content=$(cat "$ssh_key_file" | tr -d '\n')
         if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
-            --data-raw "{\"sshkey\": \"/root/.ssh/id_rsa.pub\"}" >/dev/null 2>&1; then
+            --data-raw "{\"sshkeys\":\"${ssh_key_content}\"}" >/dev/null 2>&1; then
             log_error "Failed to configure SSH key"
             return 5
         fi
+        log_info "SSH key injected from ${ssh_key_file}"
     else
-        log_warn "SSH public key not found at /root/.ssh/id_rsa.pub - SSH access may not work"
+        log_warn "No SSH public key found (~/.ssh/id_*.pub) - SSH access will not work"
+        log_warn "Generate one with: ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_qemu_test"
     fi
 
     log_success "VM configured: ${VM_CPU} CPU, ${VM_RAM}MB RAM, ${VM_DISK}GB disk"
@@ -520,14 +532,30 @@ verify_ssh_ready() {
 
     local vm_ip="$VM_IP"
     local ssh_user="${VM_SSH_USER}"
-    local max_wait=60
+    local max_wait=120  # cloud-init + sshd startup takes time
     local elapsed=0
+
+    # Find SSH key that was injected
+    local ssh_key=""
+    for candidate in ~/.ssh/id_ed25519_qemu_test ~/.ssh/id_ed25519 ~/.ssh/id_rsa; do
+        if [[ -f "$candidate" ]]; then
+            ssh_key="$candidate"
+            break
+        fi
+    done
+    
+    local key_arg=""
+    if [[ -n "$ssh_key" ]]; then
+        key_arg="-i $ssh_key"
+        log_info "Using SSH key: ${ssh_key}"
+    fi
 
     while [[ $elapsed -lt $max_wait ]]; do
         if ssh -o BatchMode=yes \
                -o ConnectTimeout=5 \
                -o StrictHostKeyChecking=no \
                -o UserKnownHostsFile=/dev/null \
+               $key_arg \
                "${ssh_user}@${vm_ip}" \
                "exit 0" 2>/dev/null; then
             log_success "SSH is ready at ${ssh_user}@${vm_ip}"
@@ -536,7 +564,9 @@ verify_ssh_ready() {
 
         sleep 5
         ((elapsed+=5))
-        log_info "Waiting for SSH... (${elapsed}s/${max_wait}s)"
+        if [[ $((elapsed % 30)) -eq 0 ]]; then
+            log_info "Waiting for SSH... (${elapsed}s/${max_wait}s)"
+        fi
     done
 
     log_error "SSH not accessible after ${max_wait}s"
