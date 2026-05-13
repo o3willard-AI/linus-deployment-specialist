@@ -350,10 +350,21 @@ echo -e "${GREEN}✅ Workload completed successfully${NC}"
 # Step 10: Restore snapshot "pre-workload" (should revert nginx removal)
 echo -e "${YELLOW}[10/12]${NC} Restoring snapshot 'pre-workload'..."
 
-_api -X POST "https://${PROXMOX_HOST}:8006/api2/json/nodes/${PROXMOX_NODE:-moxy}/qemu/${VM_ID}/snapshot/pre-workload/rollback" \
-    -d start=1
+api_output=$(_api -X POST "https://${PROXMOX_HOST}:8006/api2/json/nodes/${PROXMOX_NODE:-moxy}/qemu/${VM_ID}/snapshot/pre-workload/rollback" \
+    -d start=1)
+echo "$api_output" | jq .
 
 echo -e "${GREEN}✅ Snapshot 'pre-workload' restored${NC}"
+
+# Wait for VM to fully boot after rollback
+echo "  Waiting for VM to reboot..."
+sleep 5
+for i in $(seq 1 30); do
+    if ssh ${SSH_OPTS[@]} ubuntu@$VM_IP "echo ok" &>/dev/null; then
+        break
+    fi
+    sleep 2
+done
 
 # Step 11: Verify nginx is GONE (snapshot restored correctly)
 echo -e "${YELLOW}[11/12]${NC} Verifying snapshot restore..."
