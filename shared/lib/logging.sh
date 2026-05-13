@@ -40,7 +40,7 @@ mkdir -p "$(dirname "$LINUS_LOG_FILE")" 2>/dev/null || true
 
 log_info() {
     local msg="[INFO] $(date '+%Y-%m-%d %H:%M:%S') - $*"
-    echo -e "${BLUE}${msg}${NC}"
+    echo -e "${BLUE}${msg}${NC}" >&2
     echo "$msg" >> "$LINUS_LOG_FILE"
 }
 
@@ -58,14 +58,14 @@ log_error() {
 
 log_success() {
     local msg="[SUCCESS] $(date '+%Y-%m-%d %H:%M:%S') - $*"
-    echo -e "${GREEN}${msg}${NC}"
+    echo -e "${GREEN}${msg}${NC}" >&2
     echo "$msg" >> "$LINUS_LOG_FILE"
 }
 
 log_debug() {
     if [[ "${LINUS_DEBUG:-0}" == "1" ]]; then
         local msg="[DEBUG] $(date '+%Y-%m-%d %H:%M:%S') - $*"
-        echo -e "${CYAN}${msg}${NC}"
+        echo -e "${CYAN}${msg}${NC}" >&2
         echo "$msg" >> "$LINUS_LOG_FILE"
     fi
 }
@@ -74,7 +74,7 @@ log_step() {
     local step="$1"
     shift
     local msg="[STEP $step] $(date '+%Y-%m-%d %H:%M:%S') - $*"
-    echo -e "${GREEN}${msg}${NC}"
+    echo -e "${GREEN}${msg}${NC}" >&2
     echo "$msg" >> "$LINUS_LOG_FILE"
 }
 
@@ -154,11 +154,13 @@ log_header() {
     local len=${#msg}
     local line=$(printf '=%.0s' $(seq 1 $((len + 4))))
     
-    echo ""
-    echo -e "${GREEN}${line}${NC}"
-    echo -e "${GREEN}= ${msg} =${NC}"
-    echo -e "${GREEN}${line}${NC}"
-    echo ""
+    {
+        echo ""
+        echo -e "${GREEN}${line}${NC}"
+        echo -e "${GREEN}= ${msg} =${NC}"
+        echo -e "${GREEN}${line}${NC}"
+        echo ""
+    } >&2
     
     {
         echo ""
