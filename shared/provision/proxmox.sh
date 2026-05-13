@@ -226,14 +226,37 @@ clone_template() {
     log_info "Creating VM ${vm_id} from template ${VM_TEMPLATE_ID}..."
 
     # Clone the template using API call
-    if ! _pvesh post /nodes/${PROXMOX_NODE}/qemu/${VM_TEMPLATE_ID}/clone \
-        --data-raw "{\"newid\":${vm_id},\"name\":\"${vm_name}\",\"full\":1,\"storage\":\"${PROXMOX_STORAGE}\"}" >/dev/null 2>&1; then
-        log_error "Failed to clone template"
+    local clone_result
+    clone_result=$(_pvesh post /nodes/${PROXMOX_NODE}/qemu/${VM_TEMPLATE_ID}/clone \
+        --data-raw "{\"newid\":${vm_id},\"name\":\"${vm_name}\",\"full\":1,\"storage\":\"${PROXMOX_STORAGE}\"}" 2>/dev/null)
+    
+    if [[ -z "$clone_result" ]]; then
+        log_error "Failed to clone template (no response)"
         return 5
     fi
 
-    log_success "VM ${vm_id} created from template"
-    return 0
+    # Wait for clone task to complete (API returns immediately, clone runs async)
+    local max_wait=120
+    local elapsed=0
+    while [[ $elapsed -lt $max_wait ]]; do
+        local lock_status
+        lock_status=$(_pvesh get /nodes/${PROXMOX_NODE}/qemu/${vm_id}/status/current 2>/dev/null | \
+            python3 -c "import json,sys; print(json.load(sys.stdin).get('data',{}).get('lock','none'))" 2>/dev/null) || lock_status="error"
+        
+        if [[ "$lock_status" == "none" ]]; then
+            log_success "VM ${vm_id} created from template (${elapsed}s)"
+            return 0
+        fi
+        
+        sleep 3
+        ((elapsed+=3))
+        if [[ $((elapsed % 15)) -eq 0 ]]; then
+            log_info "Waiting for clone to complete... (${elapsed}s/${max_wait}s)"
+        fi
+    done
+
+    log_error "Clone task did not complete within ${max_wait}s"
+    return 5
 }
 
 # -----------------------------------------------------------------------------
