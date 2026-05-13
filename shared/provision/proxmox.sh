@@ -231,6 +231,15 @@ clone_template() {
     fi
 
     log_success "VM ${vm_id} created from template"
+    
+    # Regenerate cloud-init drive for the new VM (critical for network)
+    log_info "Regenerating cloud-init configuration..."
+    if _pvesh post /nodes/${PROXMOX_NODE}/qemu/${vm_id}/cloudinit >/dev/null 2>&1; then
+        log_info "Cloud-init regenerated for VM ${vm_id}"
+    else
+        log_warn "Cloud-init regeneration failed (VM may not get IP via DHCP)"
+    fi
+    
     return 0
 }
 
@@ -393,36 +402,61 @@ wait_for_network() {
     log_step "6" "Waiting for network configuration"
 
     local vm_id="$ALLOCATED_VM_ID"
-    local max_wait=120
+    local max_wait=300  # 5 minutes for cloud-init on first boot
     local elapsed=0
     local vm_ip=""
     local vm_mac=""
 
-    # Get VM MAC address for fallback network scan - we'll get this from API instead
-    # Note: This is more complex with API, so we'll rely on agent calls for now
+    # Get VM MAC address from config for fallback scans
+    vm_mac=$(_pvesh get /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config 2>/dev/null | \
+        python3 -c "
+import json, sys, re
+data = json.load(sys.stdin).get('data', {})
+for k, v in data.items():
+    if k.startswith('net'):
+        m = re.search(r'([0-9A-Fa-f:]{17})', str(v))
+        if m:
+            print(m.group(1).lower())
+            break
+" 2>/dev/null) || vm_mac=""
+    log_info "VM MAC: ${vm_mac:-unknown}"
 
     while [[ $elapsed -lt $max_wait ]]; do
-        # Method 1: Try to get IP from QEMU agent (preferred)
-        vm_ip=$(_pvesh get /nodes/${PROXMOX_NODE}/qemu/${vm_id}/agent/network-get-interfaces | \
-                jq -r '.data.interfaces[] | select(.name == "eth0" or .name == "ens18" or .name == "ens3") | .ip-addresses[]? | select(.family == "inet") | .address' 2>/dev/null | \
-                grep -v "127.0.0.1" | head -1 || echo "")
+        # Method 1: QEMU guest agent (if installed in template)
+        vm_ip=$(_pvesh get /nodes/${PROXMOX_NODE}/qemu/${vm_id}/agent/network-get-interfaces 2>/dev/null | \
+                python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    interfaces = data.get('data', {}).get('result', [])
+    for iface in interfaces:
+        if iface.get('name') in ('eth0', 'ens18', 'ens3'):
+            for addr in iface.get('ip-addresses', []):
+                if addr.get('ip-address-type') == 'ipv4' and not addr.get('ip-address', '').startswith('127.'):
+                    print(addr['ip-address'])
+                    raise SystemExit(0)
+except: pass
+" 2>/dev/null) || vm_ip=""
 
-        # Method 2: Fallback to network scan if QEMU agent not available
-        if [[ -z "$vm_ip" && -n "$vm_mac" ]]; then
-            # Run network scan every 30s and parse output for MAC address
-            if [[ $((elapsed % 30)) -eq 0 && $elapsed -gt 0 ]]; then
-                vm_ip=$(nmap -sn 192.168.101.0/24 2>/dev/null | \
-                        grep -B 2 -i "$vm_mac" | \
-                        grep -oP 'Nmap scan report for .*\\((\\d+\\.\\d+\\.\\d+\\.\\d+)\\)' | \
-                        grep -oP '\\d+\\.\\d+\\.\\d+\\.\\d+' | head -1 || echo "")
+        # Method 2: Local ARP table (no deps, works if on same L2 network)
+        if [[ -z "$vm_ip" && -n "$vm_mac" && $((elapsed % 15)) -eq 0 && $elapsed -gt 10 ]]; then
+            vm_ip=$(ip neigh show 2>/dev/null | grep -i "$vm_mac" | awk '{print $1}' | head -1) || vm_ip=""
+        fi
 
-                # If no parentheses format, try simple format
-                if [[ -z "$vm_ip" ]]; then
-                    vm_ip=$(nmap -sn 192.168.101.0/24 2>/dev/null | \
-                            grep -B 2 -i "$vm_mac" | \
-                            grep -oP 'Nmap scan report for \\K\\d+\\.\\d+\\.\\d+\\.\\d+' | head -1 || echo "")
-                fi
-            fi
+        # Method 3: Python scapy-free ARP scan via /proc/net/arp
+        if [[ -z "$vm_ip" && -n "$vm_mac" && $((elapsed % 30)) -eq 0 && $elapsed -gt 20 ]]; then
+            vm_ip=$(python3 -c "
+import subprocess, re
+try:
+    out = subprocess.check_output(['ip', 'neigh', 'show'], text=True)
+    for line in out.splitlines():
+        if '${vm_mac}' in line.lower():
+            ip = line.split()[0]
+            if re.match(r'\d+\.\d+\.\d+\.\d+', ip):
+                print(ip)
+                break
+except: pass
+" 2>/dev/null) || vm_ip=""
         fi
 
         if [[ -n "$vm_ip" ]]; then
@@ -433,10 +467,12 @@ wait_for_network() {
 
         sleep 5
         ((elapsed+=5))
-        log_info "Waiting for network... (${elapsed}s/${max_wait}s)"
+        if [[ $((elapsed % 30)) -eq 0 ]]; then
+            log_info "Waiting for network... (${elapsed}s/${max_wait}s)"
+        fi
     done
 
-    log_error "Timeout waiting for network configuration"
+    log_error "Timeout waiting for network configuration (${max_wait}s)"
     return 6
 }
 
