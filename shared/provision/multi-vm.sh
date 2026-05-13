@@ -171,7 +171,7 @@ function provision_single_vm() {
         local vm_user
         vm_user=$(echo "$output" | grep "LINUS_VM_USER:" | cut -d: -f2- | tr -d '\r\n\t ')
         local vm_id
-        vm_id=$(echo "$output" | grep "LINUS_VM_NAME:" | cut -d: -f2- | tr -d '\r\n\t ')
+        vm_id=$(echo "$output" | grep "LINUS_VM_ID:" | cut -d: -f2- | tr -d '\r\n\t ')
         
         if [[ -z "${vm_ip}" || -z "${vm_user}" ]]; then
             log_error "Failed to extract VM details from provisioning output for ${vm_name}"
