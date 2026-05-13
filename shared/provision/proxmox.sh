@@ -553,7 +553,7 @@ verify_ssh_ready() {
     log_step "7" "Verifying SSH accessibility"
 
     local vm_ip="$VM_IP"
-    local ssh_user="${VM_SSH_USER}"
+    local ssh_user="${VM_SSH_USER:-ubuntu}"
     local max_wait=300  # Ubuntu 24.04 first-boot cloud-init (resize + config + keys) >120s
     local elapsed=0
 
@@ -616,12 +616,13 @@ output_result() {
     log_step "8" "Generating output"
 
     local vm_name="${VM_NAME:-linus-vm-${ALLOCATED_VM_ID}}"
+    local ssh_user="${VM_SSH_USER:-ubuntu}"
 
     # Structured output for parsing
     linus_success \
         "VM_ID:${ALLOCATED_VM_ID}" \
         "VM_IP:${VM_IP}" \
-        "VM_USER:${VM_SSH_USER}" \
+        "VM_USER:${ssh_user}" \
         "VM_NAME:${vm_name}" \
         "VM_CPU:${VM_CPU}" \
         "VM_RAM:${VM_RAM}" \
