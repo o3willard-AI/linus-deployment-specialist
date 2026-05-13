@@ -165,13 +165,13 @@ function provision_single_vm() {
             return 4
         fi
         
-        # Parse output for VM details
+        # Parse output for VM details (strip all whitespace including \r\n)
         local vm_ip
-        vm_ip=$(echo "$output" | grep "LINUS_VM_IP:" | cut -d: -f2- | tr -d ' ')
+        vm_ip=$(echo "$output" | grep "LINUS_VM_IP:" | cut -d: -f2- | tr -d '\r\n\t ')
         local vm_user
-        vm_user=$(echo "$output" | grep "LINUS_VM_USER:" | cut -d: -f2- | tr -d ' ')
+        vm_user=$(echo "$output" | grep "LINUS_VM_USER:" | cut -d: -f2- | tr -d '\r\n\t ')
         local vm_id
-        vm_id=$(echo "$output" | grep "LINUS_VM_NAME:" | cut -d: -f2- | tr -d ' ')
+        vm_id=$(echo "$output" | grep "LINUS_VM_NAME:" | cut -d: -f2- | tr -d '\r\n\t ')
         
         if [[ -z "${vm_ip}" || -z "${vm_user}" ]]; then
             log_error "Failed to extract VM details from provisioning output for ${vm_name}"
@@ -373,8 +373,8 @@ main() {
     log_info "=== Stage 4: Verifying SSH Access ==="
     for ((i=1; i<=VM_COUNT; i++)); do
         local vm_details="${VM_DETAILS[$((i-1))]}"
-        local vm_ip=$(echo "${vm_details}" | cut -d: -f2)
-        local vm_user=$(echo "${vm_details}" | cut -d: -f3)
+        local vm_ip=$(echo "${vm_details}" | cut -d: -f2 | tr -d '\r\n\t ')
+        local vm_user=$(echo "${vm_details}" | cut -d: -f3 | tr -d '\r\n\t ')
         
         log_info "Verifying SSH access for VM $i..."
         wait_for_ssh "${vm_ip}" "${vm_user}" || {
