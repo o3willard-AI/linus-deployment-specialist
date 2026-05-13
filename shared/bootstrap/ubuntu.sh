@@ -217,7 +217,7 @@ install_essential_packages() {
     log_info "Installing: ${packages}"
 
     local attempt=0
-    local max_attempts=5
+    local max_attempts=8
     local apt_output
 
     while [[ $attempt -lt $max_attempts ]]; do
@@ -226,9 +226,9 @@ install_essential_packages() {
             log_success "Essential packages installed"
             return 0
         }
-        if echo "$apt_output" | grep -qE "Could not get lock|Unable to lock"; then
+        if echo "$apt_output" | grep -qE "Could not get lock|Unable to lock|Unable to acquire the dpkg"; then
             log_info "apt lock held — waiting (attempt $attempt/$max_attempts)..."
-            sleep $((attempt * 3))
+            sleep $((attempt * 4))
         else
             break
         fi
@@ -266,7 +266,7 @@ install_extra_packages() {
             log_success "Extra packages installed"
             return 0
         }
-        if echo "$apt_output" | grep -qE "Could not get lock|Unable to lock"; then
+        if echo "$apt_output" | grep -qE "Could not get lock|Unable to lock|Unable to acquire the dpkg"; then
             log_info "apt lock held — waiting (attempt $attempt/$max_attempts)..."
             sleep $((attempt * 3))
         else
