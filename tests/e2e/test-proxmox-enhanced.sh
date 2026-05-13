@@ -166,15 +166,21 @@ echo -e "${YELLOW}[3/7]${NC} Bootstrapping Ubuntu..."
 # Define common SSH options as an array (IFS is set to $'\n\t', not space!)
 readonly SSH_OPTS=(-i "${SSH_KEY_FILE}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=10)
 
-# Create working directory on VM
-if ! ssh "${SSH_OPTS[@]}" ubuntu@$VM_IP "mkdir -p /tmp/linus" 2>&1; then
+# Create working directories on VM (all scripts source ../lib/paths.sh)
+if ! ssh "${SSH_OPTS[@]}" ubuntu@$VM_IP "mkdir -p /tmp/linus /tmp/lib" 2>&1; then
     echo -e "${RED}❌ Failed to create directory on VM (SSH_KEY_FILE=${SSH_KEY_FILE})${NC}"
     exit 1
 fi
 
-# Upload bootstrap scripts directly
-scp ${SSH_OPTS[@]} shared/bootstrap/ubuntu.sh shared/lib/logging.sh shared/lib/validation.sh ubuntu@$VM_IP:/tmp/linus/ 2>/dev/null || {
+# Upload bootstrap script to /tmp/linus/
+scp ${SSH_OPTS[@]} shared/bootstrap/ubuntu.sh ubuntu@$VM_IP:/tmp/linus/ 2>/dev/null || {
     echo -e "${RED}❌ Failed to upload bootstrap script${NC}"
+    exit 1
+}
+
+# Upload ALL shared lib files to /tmp/lib/ (needed by every script's ../lib/paths.sh)
+scp ${SSH_OPTS[@]} shared/lib/*.sh ubuntu@$VM_IP:/tmp/lib/ 2>/dev/null || {
+    echo -e "${RED}❌ Failed to upload lib scripts${NC}"
     exit 1
 }
 
@@ -199,7 +205,7 @@ echo -e "${YELLOW}[4/7]${NC} Installing development tools..."
 echo "  This will take 3-5 minutes (Docker installation)..."
 
 # Upload dev-tools script
-scp ${SSH_OPTS[@]} shared/configure/dev-tools.sh shared/lib/noninteractive.sh ubuntu@$VM_IP:/tmp/linus/ 2>/dev/null || {
+scp ${SSH_OPTS[@]} shared/configure/dev-tools.sh ubuntu@$VM_IP:/tmp/linus/ 2>/dev/null || {
     echo -e "${RED}❌ Failed to upload dev-tools script${NC}"
     exit 1
 }
