@@ -423,12 +423,14 @@ configure_vm() {
     if [[ -n "$ssh_key_file" ]]; then
         local ssh_key_content
         ssh_key_content=$(cat "$ssh_key_file" | tr -d '\n')
-        if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
-            --data-raw "{\"sshkeys\":\"${ssh_key_content}\"}" >/dev/null 2>&1; then
-            log_error "Failed to configure SSH key"
-            return 5
+        # Use qm set via SSH (handles encoding correctly, unlike the API)
+        if sshpass -p "${PROXMOX_SSH_PASS:-}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+            "root@${PROXMOX_HOST}" "printf '%s' '${ssh_key_content}' > /tmp/linus-key-${vm_id}.pub && qm set ${vm_id} --sshkeys /tmp/linus-key-${vm_id}.pub && rm -f /tmp/linus-key-${vm_id}.pub" 2>/dev/null; then
+            log_info "SSH key injected from ${ssh_key_file}"
+        else
+            log_warn "SSH key injection failed (SSH to Proxmox host unavailable)"
+            log_warn "VM will be reachable by ping but not SSH — set PROXMOX_SSH_PASS for key injection"
         fi
-        log_info "SSH key injected from ${ssh_key_file}"
     else
         log_warn "No SSH public key found (~/.ssh/id_*.pub) - SSH access will not work"
         log_warn "Generate one with: ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_qemu_test"
