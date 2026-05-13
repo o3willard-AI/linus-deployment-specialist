@@ -191,6 +191,20 @@ function wait_for_ssh() {
     local wait_time=0
     local interval=5
     
+    # Auto-detect SSH key (same logic as verify_ssh_ready in proxmox.sh)
+    local ssh_key=""
+    for candidate in ~/.ssh/id_ed25519_qemu_test ~/.ssh/id_ed25519 ~/.ssh/id_rsa; do
+        if [[ -f "$candidate" ]]; then
+            ssh_key="$candidate"
+            break
+        fi
+    done
+    
+    local ssh_args=(-o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes)
+    if [[ -n "$ssh_key" ]]; then
+        ssh_args+=(-i "$ssh_key")
+    fi
+    
     log_info "Waiting for SSH access to ${user}@${ip} (max ${max_wait}s)"
     
     if [[ "${DRY_RUN}" == "true" ]]; then
@@ -199,7 +213,7 @@ function wait_for_ssh() {
     fi
     
     while [[ $wait_time -lt $max_wait ]]; do
-        if ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "${user}@${ip}" "echo 'SSH access confirmed'" >/dev/null 2>&1; then
+        if ssh "${ssh_args[@]}" "${user}@${ip}" "echo 'SSH access confirmed'" >/dev/null 2>&1; then
             log_info "SSH access confirmed for ${user}@${ip}"
             return 0
         fi
