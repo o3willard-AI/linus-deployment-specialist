@@ -114,6 +114,7 @@ export PROXMOX_HOST="$PROXMOX_HOST"
 export PROXMOX_USER="$PROXMOX_USER"
 export PROXMOX_TOKEN_ID="$PROXMOX_TOKEN_ID"
 export PROXMOX_TOKEN_SECRET="$PROXMOX_TOKEN_SECRET"
+export PROXMOX_SSH_PASS="${PROXMOX_SSH_PASS:-}"
 export VM_CPU=2
 export VM_RAM=2048
 export VM_DISK=20
@@ -429,6 +430,7 @@ export PROXMOX_HOST="$PROXMOX_HOST"
 export PROXMOX_USER="$PROXMOX_USER"
 export PROXMOX_TOKEN_ID="$PROXMOX_TOKEN_ID"
 export PROXMOX_TOKEN_SECRET="$PROXMOX_TOKEN_SECRET"
+export PROXMOX_SSH_PASS="${PROXMOX_SSH_PASS:-}"
 
 # Run the multi-VM provisioning script
 bash shared/provision/multi-vm.sh > /tmp/multi-vm-output.txt 2>&1 || {
