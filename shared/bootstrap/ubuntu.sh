@@ -156,10 +156,12 @@ update_package_cache() {
 
     export DEBIAN_FRONTEND=noninteractive
 
-    if ! apt-get update -qq > /dev/null 2>&1; then
+    local apt_output
+    apt_output=$(apt-get update -qq 2>&1) || {
         log_error "Failed to update package cache"
+        log_error "apt output: ${apt_output}"
         return 6
-    fi
+    }
 
     log_success "Package cache updated"
     return 0
