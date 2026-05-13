@@ -193,15 +193,17 @@ print(' '.join(str(i) for i in ids))
     # Find first available ID starting from next free slot
     local vm_id=113
     while true; do
-        # Check if vm_id appears as a whole word in used_ids
         if ! echo " $used_ids " | grep -q " $vm_id "; then
             ALLOCATED_VM_ID="$vm_id"
-            log_success "Allocated VM ID: $vm_id (used: $used_ids)"
+            # Static IP allocation: 192.168.101.{vm_id} (no DHCP on vmbr0)
+            ALLOCATED_VM_IP="192.168.101.${vm_id}"
+            GATEWAY_IP="192.168.101.2"
+            log_success "Allocated VM ID: $vm_id (IP: $ALLOCATED_VM_IP, used: $used_ids)"
             return 0
         fi
         ((vm_id++))
-        if [[ $vm_id -gt 999 ]]; then
-            log_error "No available VM IDs (checked 113-999)"
+        if [[ $vm_id -gt 250 ]]; then
+            log_error "No available VM IDs (checked 113-250)"
             return 5
         fi
     done
@@ -231,15 +233,6 @@ clone_template() {
     fi
 
     log_success "VM ${vm_id} created from template"
-    
-    # Regenerate cloud-init drive for the new VM (critical for network)
-    log_info "Regenerating cloud-init configuration..."
-    if _pvesh post /nodes/${PROXMOX_NODE}/qemu/${vm_id}/cloudinit >/dev/null 2>&1; then
-        log_info "Cloud-init regenerated for VM ${vm_id}"
-    else
-        log_warn "Cloud-init regeneration failed (VM may not get IP via DHCP)"
-    fi
-    
     return 0
 }
 
@@ -259,12 +252,11 @@ configure_network_for_os_type() {
     
     case "$os_type" in
         ubuntu|debian)
-            # Ubuntu/Debian - standard cloud-init networking
-            log_info "Ubuntu/Debian: Standard cloud-init networking (automatic)"
-            # Ensure VM has QEMU guest agent installed and enabled
+            # Ubuntu/Debian - configure static IP (no DHCP on vmbr0)
+            log_info "Ubuntu/Debian: Configuring static IP ${ALLOCATED_VM_IP}/24 gw ${GATEWAY_IP}"
             if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id} \
-                --data-raw "{\"agent\":1,\"net0\":\"bridge=${PROXMOX_BRIDGE}\"}" >/dev/null 2>&1; then
-                log_warn "Failed to configure network agent settings (non-fatal)"
+                --data-raw "{\"agent\":1,\"ipconfig0\":\"ip=${ALLOCATED_VM_IP}/24,gw=${GATEWAY_IP}\"}" >/dev/null 2>&1; then
+                log_warn "Failed to configure static IP (non-fatal)"
             fi
             ;;
         almalinux|rocky)
@@ -368,6 +360,27 @@ configure_vm() {
 }
 
 # -----------------------------------------------------------------------------
+# Function: regenerate_cloudinit
+# -----------------------------------------------------------------------------
+# Regenerates cloud-init ISO after all config changes (network, SSH, etc.)
+# Must run AFTER configure_network_for_os_type and configure_vm
+# Requires: ALLOCATED_VM_ID
+# Returns: 0 on success, non-zero on failure
+# -----------------------------------------------------------------------------
+
+regenerate_cloudinit() {
+    local vm_id="$ALLOCATED_VM_ID"
+    log_info "Regenerating cloud-init ISO with final config..."
+    if _pvesh post /nodes/${PROXMOX_NODE}/qemu/${vm_id}/cloudinit >/dev/null 2>&1; then
+        log_info "Cloud-init ISO regenerated for VM ${vm_id}"
+        return 0
+    else
+        log_warn "Cloud-init regeneration failed (VM may not have correct network config)"
+        return 1
+    fi
+}
+
+# -----------------------------------------------------------------------------
 # Function: start_vm
 # -----------------------------------------------------------------------------
 # Starts the VM
@@ -402,77 +415,28 @@ wait_for_network() {
     log_step "6" "Waiting for network configuration"
 
     local vm_id="$ALLOCATED_VM_ID"
+    local vm_ip="${ALLOCATED_VM_IP}"
     local max_wait=300  # 5 minutes for cloud-init on first boot
     local elapsed=0
-    local vm_ip=""
-    local vm_mac=""
 
-    # Get VM MAC address from config for fallback scans
-    vm_mac=$(_pvesh get /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config 2>/dev/null | \
-        python3 -c "
-import json, sys, re
-data = json.load(sys.stdin).get('data', {})
-for k, v in data.items():
-    if k.startswith('net'):
-        m = re.search(r'([0-9A-Fa-f:]{17})', str(v))
-        if m:
-            print(m.group(1).lower())
-            break
-" 2>/dev/null) || vm_mac=""
-    log_info "VM MAC: ${vm_mac:-unknown}"
+    log_info "Waiting for VM to respond at ${vm_ip}..."
 
     while [[ $elapsed -lt $max_wait ]]; do
-        # Method 1: QEMU guest agent (if installed in template)
-        vm_ip=$(_pvesh get /nodes/${PROXMOX_NODE}/qemu/${vm_id}/agent/network-get-interfaces 2>/dev/null | \
-                python3 -c "
-import json, sys
-try:
-    data = json.load(sys.stdin)
-    interfaces = data.get('data', {}).get('result', [])
-    for iface in interfaces:
-        if iface.get('name') in ('eth0', 'ens18', 'ens3'):
-            for addr in iface.get('ip-addresses', []):
-                if addr.get('ip-address-type') == 'ipv4' and not addr.get('ip-address', '').startswith('127.'):
-                    print(addr['ip-address'])
-                    raise SystemExit(0)
-except: pass
-" 2>/dev/null) || vm_ip=""
-
-        # Method 2: Local ARP table (no deps, works if on same L2 network)
-        if [[ -z "$vm_ip" && -n "$vm_mac" && $((elapsed % 15)) -eq 0 && $elapsed -gt 10 ]]; then
-            vm_ip=$(ip neigh show 2>/dev/null | grep -i "$vm_mac" | awk '{print $1}' | head -1) || vm_ip=""
-        fi
-
-        # Method 3: Python scapy-free ARP scan via /proc/net/arp
-        if [[ -z "$vm_ip" && -n "$vm_mac" && $((elapsed % 30)) -eq 0 && $elapsed -gt 20 ]]; then
-            vm_ip=$(python3 -c "
-import subprocess, re
-try:
-    out = subprocess.check_output(['ip', 'neigh', 'show'], text=True)
-    for line in out.splitlines():
-        if '${vm_mac}' in line.lower():
-            ip = line.split()[0]
-            if re.match(r'\d+\.\d+\.\d+\.\d+', ip):
-                print(ip)
-                break
-except: pass
-" 2>/dev/null) || vm_ip=""
-        fi
-
-        if [[ -n "$vm_ip" ]]; then
+        # Ping the known static IP
+        if ping -c 1 -W 2 "$vm_ip" >/dev/null 2>&1; then
             VM_IP="$vm_ip"
-            log_success "VM IP obtained: $vm_ip"
+            log_success "VM reachable at $vm_ip (${elapsed}s)"
             return 0
         fi
 
         sleep 5
         ((elapsed+=5))
         if [[ $((elapsed % 30)) -eq 0 ]]; then
-            log_info "Waiting for network... (${elapsed}s/${max_wait}s)"
+            log_info "Waiting for ${vm_ip}... (${elapsed}s/${max_wait}s)"
         fi
     done
 
-    log_error "Timeout waiting for network configuration (${max_wait}s)"
+    log_error "Timeout waiting for ${vm_ip} to respond (${max_wait}s)"
     return 6
 }
 
@@ -569,6 +533,7 @@ main() {
     clone_template || exit $?
     configure_network_for_os_type || exit $?  # NEW: Configure network after clone
     configure_vm || exit $?
+    regenerate_cloudinit || exit $?  # Must be after all config, before start
     start_vm || exit $?
     wait_for_network || exit $?
     verify_ssh_ready || exit $?
