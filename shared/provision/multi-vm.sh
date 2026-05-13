@@ -213,9 +213,15 @@ function wait_for_ssh() {
     fi
     
     while [[ $wait_time -lt $max_wait ]]; do
-        if ssh "${ssh_args[@]}" "${user}@${ip}" "echo 'SSH access confirmed'" >/dev/null 2>&1; then
+        local ssh_output
+        ssh_output=$(ssh "${ssh_args[@]}" "${user}@${ip}" "echo 'SSH access confirmed'" 2>&1) && {
             log_info "SSH access confirmed for ${user}@${ip}"
             return 0
+        }
+        
+        # Show first failure for diagnostics
+        if [[ $wait_time -eq 0 ]]; then
+            log_info "SSH error: ${ssh_output}"
         fi
         
         log_info "SSH not ready yet, waiting... (${wait_time}s/${max_wait}s)"
@@ -223,6 +229,10 @@ function wait_for_ssh() {
         wait_time=$((wait_time + interval))
     done
     
+    # Show final SSH error
+    local final_error
+    final_error=$(ssh "${ssh_args[@]}" "${user}@${ip}" "echo test" 2>&1) || true
+    log_error "Final SSH error: ${final_error}"
     log_error "Timeout waiting for SSH access to ${user}@${ip}"
     return 1
 }
