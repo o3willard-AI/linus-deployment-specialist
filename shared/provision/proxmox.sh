@@ -461,7 +461,7 @@ regenerate_cloudinit() {
     local response
     local http_code
     
-    response=$(curl -sk --fail -X POST -H "$auth_header" -w "\n%{http_code}" "$url" 2>&1) || {
+    response=$(curl -sk --fail -X PUT -H "$auth_header" -w "\n%{http_code}" "$url" 2>&1) || {
         http_code="${response##*$'\n'}"
         log_warn "Cloud-init regeneration failed (HTTP ${http_code})"
         return 1
