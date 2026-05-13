@@ -214,16 +214,29 @@ install_essential_packages() {
     export DEBIAN_FRONTEND=noninteractive
 
     local packages="${ESSENTIAL_PACKAGES[*]}"
-
     log_info "Installing: ${packages}"
 
-    if ! apt-get install -y -qq ${packages} > /dev/null 2>&1; then
-        log_error "Failed to install essential packages"
-        return 6
-    fi
+    local attempt=0
+    local max_attempts=5
+    local apt_output
 
-    log_success "Essential packages installed"
-    return 0
+    while [[ $attempt -lt $max_attempts ]]; do
+        attempt=$((attempt + 1))
+        apt_output=$(apt-get install -y -qq ${packages} 2>&1) && {
+            log_success "Essential packages installed"
+            return 0
+        }
+        if echo "$apt_output" | grep -qE "Could not get lock|Unable to lock"; then
+            log_info "apt lock held — waiting (attempt $attempt/$max_attempts)..."
+            sleep $((attempt * 3))
+        else
+            break
+        fi
+    done
+
+    log_error "Failed to install essential packages"
+    log_error "apt output: ${apt_output}"
+    return 6
 }
 
 # -----------------------------------------------------------------------------
@@ -241,15 +254,27 @@ install_extra_packages() {
     export DEBIAN_FRONTEND=noninteractive
 
     local packages="${EXTRA_PACKAGES[*]}"
-
     log_info "Installing: ${packages}"
 
-    if ! apt-get install -y -qq ${packages} > /dev/null 2>&1; then
-        log_warn "Failed to install some extra packages (non-fatal)"
-    else
-        log_success "Extra packages installed"
-    fi
+    local attempt=0
+    local max_attempts=3
+    local apt_output
 
+    while [[ $attempt -lt $max_attempts ]]; do
+        attempt=$((attempt + 1))
+        apt_output=$(apt-get install -y -qq ${packages} 2>&1) && {
+            log_success "Extra packages installed"
+            return 0
+        }
+        if echo "$apt_output" | grep -qE "Could not get lock|Unable to lock"; then
+            log_info "apt lock held — waiting (attempt $attempt/$max_attempts)..."
+            sleep $((attempt * 3))
+        else
+            break
+        fi
+    done
+
+    log_warn "Failed to install some extra packages (non-fatal)"
     return 0
 }
 
