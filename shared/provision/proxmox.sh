@@ -170,6 +170,51 @@ validate_environment() {
 }
 
 # -----------------------------------------------------------------------------
+# Function: detect_network_config
+# -----------------------------------------------------------------------------
+# Queries the Proxmox host's bridge configuration to detect subnet and gateway.
+# Handles DHCP-on-router, DHCP-on-host, and no-DHCP setups dynamically.
+# Sets: SUBNET_PREFIX (first 3 octets), GATEWAY_IP, VM_CIDR
+# Returns: 0 on success, non-zero on failure (falls back to hardcoded defaults)
+# -----------------------------------------------------------------------------
+
+detect_network_config() {
+    log_step "1b" "Detecting network configuration"
+
+    local bridge_info
+    bridge_info=$(_pvesh get /nodes/${PROXMOX_NODE}/network 2>/dev/null | \
+        python3 -c "
+import json, sys, ipaddress
+data = json.load(sys.stdin).get('data', [])
+for iface in data:
+    if iface.get('iface') == '${PROXMOX_BRIDGE}' and iface.get('type') == 'bridge':
+        cidr = iface.get('cidr', '')
+        gw = iface.get('gateway', '')
+        if cidr:
+            net = ipaddress.ip_network(cidr, strict=False)
+            # First 3 octets for VM IP assignment
+            prefix = '.'.join(str(net.network_address).split('.')[:3])
+            print(f'PREFIX={prefix}|GATEWAY={gw}|CIDR={cidr}')
+        break
+" 2>/dev/null) || true
+
+    if [[ -n "$bridge_info" ]]; then
+        SUBNET_PREFIX=$(echo "$bridge_info" | grep -oP 'PREFIX=\K[^|]+')
+        GATEWAY_IP=$(echo "$bridge_info" | grep -oP 'GATEWAY=\K[^|]+')
+        VM_CIDR=$(echo "$bridge_info" | grep -oP 'CIDR=\K[^|]+')
+        log_success "Network detected: ${SUBNET_PREFIX}.0/24, gateway=${GATEWAY_IP}"
+    else
+        log_warn "Could not detect network from API, using env/fallback"
+        SUBNET_PREFIX="${PROXMOX_SUBNET_PREFIX:-192.168.101}"
+        GATEWAY_IP="${PROXMOX_GATEWAY:-192.168.101.2}"
+        VM_CIDR="${SUBNET_PREFIX}.0/24"
+        log_info "Using: ${SUBNET_PREFIX}.0/24, gateway=${GATEWAY_IP}"
+    fi
+
+    return 0
+}
+
+# -----------------------------------------------------------------------------
 # Function: allocate_vm_id
 # -----------------------------------------------------------------------------
 # Finds the next available VM ID
@@ -195,10 +240,9 @@ print(' '.join(str(i) for i in ids))
     while true; do
         if ! echo " $used_ids " | grep -q " $vm_id "; then
             ALLOCATED_VM_ID="$vm_id"
-            # Static IP allocation: 192.168.101.{vm_id} (no DHCP on vmbr0)
-            ALLOCATED_VM_IP="192.168.101.${vm_id}"
-            GATEWAY_IP="192.168.101.2"
-            log_success "Allocated VM ID: $vm_id (IP: $ALLOCATED_VM_IP, used: $used_ids)"
+            # Static IP: {subnet}.{vmid} (no DHCP on most Proxmox bridges)
+            ALLOCATED_VM_IP="${SUBNET_PREFIX}.${vm_id}"
+            log_success "Allocated VM ID: $vm_id (IP: $ALLOCATED_VM_IP, subnet: $VM_CIDR)"
             return 0
         fi
         ((vm_id++))
@@ -552,6 +596,7 @@ main() {
     trap cleanup_on_error EXIT
 
     validate_environment || exit $?
+    detect_network_config || exit $?
     allocate_vm_id || exit $?
     clone_template || exit $?
     configure_network_for_os_type || exit $?  # NEW: Configure network after clone
