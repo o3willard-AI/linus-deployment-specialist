@@ -454,13 +454,21 @@ regenerate_cloudinit() {
     log_info "Regenerating cloud-init ISO with final config..."
     # Small delay to ensure all config changes are committed before regeneration
     sleep 2
-    if _pvesh post /nodes/${PROXMOX_NODE}/qemu/${vm_id}/cloudinit >/dev/null 2>&1; then
-        log_info "Cloud-init ISO regenerated for VM ${vm_id}"
-        return 0
-    else
-        log_warn "Cloud-init regeneration failed (VM may not have correct network config)"
+    # Use direct curl (no Content-Type header) — the cloudinit endpoint
+    # doesn't accept a JSON body and rejects POST with that header set
+    local auth_header="Authorization: PVEAPIToken=${PROXMOX_USER}!${PROXMOX_TOKEN_ID}=${PROXMOX_TOKEN_SECRET}"
+    local url="https://${PROXMOX_HOST}:8006/api2/json/nodes/${PROXMOX_NODE}/qemu/${vm_id}/cloudinit"
+    local response
+    local http_code
+    
+    response=$(curl -sk --fail -X POST -H "$auth_header" -w "\n%{http_code}" "$url" 2>&1) || {
+        http_code="${response##*$'\n'}"
+        log_warn "Cloud-init regeneration failed (HTTP ${http_code})"
         return 1
-    fi
+    }
+    
+    log_info "Cloud-init ISO regenerated for VM ${vm_id}"
+    return 0
 }
 
 # -----------------------------------------------------------------------------
