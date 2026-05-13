@@ -74,15 +74,25 @@ _pvesh() {
     local url="https://${PROXMOX_HOST}:8006/api2/json${path}"
     local auth_header="Authorization: PVEAPIToken=${PROXMOX_USER}!${PROXMOX_TOKEN_ID}=${PROXMOX_TOKEN_SECRET}"
     
+    # Only add Content-Type when data arguments are provided (e.g., --data-raw)
+    # POST/PUT endpoints without data reject Content-Type: application/json (HTTP 501)
+    local ct_header=()
+    for arg in "$@"; do
+        if [[ "$arg" == --data* ]]; then
+            ct_header=(-H "Content-Type: application/json")
+            break
+        fi
+    done
+    
     case "$method" in
         get)
             curl -sk -H "$auth_header" "$url" "$@" 2>/dev/null
             ;;
         post)
-            curl -sk --fail -X POST -H "$auth_header" -H "Content-Type: application/json" "$url" "$@" 2>/dev/null
+            curl -sk --fail -X POST -H "$auth_header" "${ct_header[@]}" "$url" "$@" 2>/dev/null
             ;;
         put)
-            curl -sk --fail -X PUT -H "$auth_header" -H "Content-Type: application/json" "$url" "$@" 2>/dev/null
+            curl -sk --fail -X PUT -H "$auth_header" "${ct_header[@]}" "$url" "$@" 2>/dev/null
             ;;
         delete)
             curl -sk -X DELETE -H "$auth_header" "$url" "$@" 2>/dev/null
