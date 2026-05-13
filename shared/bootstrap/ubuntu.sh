@@ -156,15 +156,30 @@ update_package_cache() {
 
     export DEBIAN_FRONTEND=noninteractive
 
+    # First boot may have unattended-upgrades or cloud-init also running apt-get —
+    # retry with backoff to avoid lock contention
+    local attempt=0
+    local max_attempts=10
     local apt_output
-    apt_output=$(apt-get update -qq 2>&1) || {
-        log_error "Failed to update package cache"
-        log_error "apt output: ${apt_output}"
-        return 6
-    }
 
-    log_success "Package cache updated"
-    return 0
+    while [[ $attempt -lt $max_attempts ]]; do
+        attempt=$((attempt + 1))
+        apt_output=$(apt-get update -qq 2>&1) && {
+            log_success "Package cache updated (attempt $attempt)"
+            return 0
+        }
+        if echo "$apt_output" | grep -q "Could not get lock"; then
+            log_info "apt lock held — waiting (attempt $attempt/$max_attempts)..."
+            sleep $((attempt * 3))
+        else
+            # Non-lock error — don't retry
+            break
+        fi
+    done
+
+    log_error "Failed to update package cache"
+    log_error "apt output: ${apt_output}"
+    return 6
 }
 
 # -----------------------------------------------------------------------------
