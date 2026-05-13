@@ -200,7 +200,7 @@ function provision_vm() {
 function wait_for_ssh() {
     local ip="$1"
     local user="$2"
-    local max_wait=120  # seconds
+    local max_wait=300  # seconds (Ubuntu 24.04 first-boot cloud-init >120s)
     local wait_time=0
     local interval=5
     

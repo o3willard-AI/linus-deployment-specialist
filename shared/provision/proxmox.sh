@@ -554,7 +554,7 @@ verify_ssh_ready() {
 
     local vm_ip="$VM_IP"
     local ssh_user="${VM_SSH_USER}"
-    local max_wait=120  # cloud-init + sshd startup takes time
+    local max_wait=300  # Ubuntu 24.04 first-boot cloud-init (resize + config + keys) >120s
     local elapsed=0
 
     # Find SSH key that was injected
@@ -566,22 +566,25 @@ verify_ssh_ready() {
         fi
     done
     
-    local key_arg=""
+    # Build SSH args as an array (avoids word-splitting issues)
+    local ssh_args=(-o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
     if [[ -n "$ssh_key" ]]; then
-        key_arg="-i $ssh_key"
+        ssh_args+=(-i "$ssh_key")
         log_info "Using SSH key: ${ssh_key}"
     fi
 
     while [[ $elapsed -lt $max_wait ]]; do
-        if ssh -o BatchMode=yes \
-               -o ConnectTimeout=5 \
-               -o StrictHostKeyChecking=no \
-               -o UserKnownHostsFile=/dev/null \
-               $key_arg \
+        # Capture SSH error for diagnostics (don't suppress stderr)
+        local ssh_error
+        ssh_error=$(ssh "${ssh_args[@]}" \
                "${ssh_user}@${vm_ip}" \
-               "exit 0" 2>/dev/null; then
+               "exit 0" 2>&1) && {
             log_success "SSH is ready at ${ssh_user}@${vm_ip}"
             return 0
+        }
+        # Log first 3 failures for diagnosis
+        if [[ $elapsed -le 15 ]]; then
+            log_info "SSH attempt failed: ${ssh_error}"
         fi
 
         sleep 5
@@ -590,6 +593,13 @@ verify_ssh_ready() {
             log_info "Waiting for SSH... (${elapsed}s/${max_wait}s)"
         fi
     done
+
+    # Diagnostic: try SSH with verbose output to capture the actual error
+    log_warn "SSH diagnostic — ssh_key=[${ssh_key}]"
+    log_warn "SSH diagnostic (verbose):"
+    ssh -vv "${ssh_args[@]}" \
+        "${ssh_user}@${vm_ip}" \
+        "exit 0" 2>&1 | grep -iE 'debug1.*(Offering|Authenticat|Trying|identity|auth|Accepted|denied|closed|Permission|key type)' | tail -5 || true
 
     log_error "SSH not accessible after ${max_wait}s"
     return 6
