@@ -404,8 +404,8 @@ configure_vm() {
 
     # Resize disk
     log_info "Resizing disk to ${VM_DISK}G..."
-    if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
-        --data-raw "{\"disk\": \"scsi0=${PROXMOX_STORAGE}:${VM_DISK}G\"}" >/dev/null 2>&1; then
+    if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/resize \
+        --data-raw "{\"disk\":\"scsi0\",\"size\":\"${VM_DISK}G\"}" >/dev/null 2>&1; then
         log_error "Failed to resize disk"
         return 5
     fi
