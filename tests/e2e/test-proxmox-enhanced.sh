@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # ============================================================================= 
-# Linus Deployment Specialist - Enhanced Proxmox E2E Test Suite
+# Linus Deployment Specialist - Proxmox E2E Test Suite
 # ============================================================================= 
 # This is a comprehensive QA battery that tests Proxmox provisioning resilience 
 # across multiple dimensions:
@@ -10,7 +10,7 @@
 # 3. Multi-VM parallel provisioning with DNS test
 # 4. Resource monitoring + cleanup verification
 #
-# All operations use API token auth (no SSH). VM access via jump-host through QEMU host.
+# All operations use API token auth for Proxmox + direct SSH to VMs.
 # =============================================================================
 
 set -euo pipefail
@@ -28,6 +28,17 @@ PROXMOX_HOST="${PROXMOX_HOST:-192.168.101.155}"
 PROXMOX_USER="${PROXMOX_USER:-root@pam}"
 PROXMOX_TOKEN_ID="${PROXMOX_TOKEN_ID:-linus-token}"
 PROXMOX_TOKEN_SECRET="${PROXMOX_TOKEN_SECRET:-}"
+
+# SSH key for direct VM access (auto-detect)
+SSH_KEY_FILE="${SSH_KEY_FILE:-}"
+if [[ -z "$SSH_KEY_FILE" ]]; then
+    for candidate in ~/.ssh/id_ed25519_qemu_test ~/.ssh/id_ed25519 ~/.ssh/id_rsa; do
+        if [[ -f "$candidate" ]]; then
+            SSH_KEY_FILE="$candidate"
+            break
+        fi
+    done
+fi
 
 # Test variables (will be populated during execution)
 VM_ID=""
@@ -145,33 +156,27 @@ echo -e "${YELLOW}[2/7]${NC} Waiting for VM to be fully ready..."
 sleep 10
 echo -e "${GREEN}✅ VM ready${NC}"
 
-# Step 3: Bootstrap Ubuntu (via jump-host through QEMU host)
+# Step 3: Bootstrap Ubuntu (direct SSH — no jump-host)
 echo -e "${YELLOW}[3/7]${NC} Bootstrapping Ubuntu..."
 
-# Upload bootstrap script and dependencies via jump-host
-# First, we need to verify the VM is accessible via jump-host
-ssh -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    sblanken@192.168.101.59 \
-    "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@$VM_IP 'mkdir -p /tmp/linus'" 2>/dev/null || {
+# Define common SSH options
+readonly SSH_OPTS="-i ${SSH_KEY_FILE} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=10"
+
+# Create working directory on VM
+ssh ${SSH_OPTS} ubuntu@$VM_IP "mkdir -p /tmp/linus" 2>/dev/null || {
     echo -e "${RED}❌ Failed to create directory on VM${NC}"
     exit 1
 }
 
-# Upload files via jump-host
-ssh -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    sblanken@192.168.101.59 \
-    "scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null shared/bootstrap/ubuntu.sh shared/lib/{logging.sh,validation.sh} ubuntu@$VM_IP:/tmp/linus/" 2>/dev/null || {
+# Upload bootstrap scripts directly
+scp ${SSH_OPTS} shared/bootstrap/ubuntu.sh shared/lib/logging.sh shared/lib/validation.sh ubuntu@$VM_IP:/tmp/linus/ 2>/dev/null || {
     echo -e "${RED}❌ Failed to upload bootstrap script${NC}"
     exit 1
 }
 
-# Execute bootstrap via jump-host
-if ! ssh -o StrictHostKeyChecking=no \
-       -o UserKnownHostsFile=/dev/null \
-       sblanken@192.168.101.59 \
-       "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@$VM_IP 'cd /tmp/linus && sudo bash ubuntu.sh'" > /tmp/bootstrap-output.txt 2>&1; then
+# Execute bootstrap
+if ! ssh ${SSH_OPTS} ubuntu@$VM_IP \
+     "cd /tmp/linus && sudo bash ubuntu.sh" > /tmp/bootstrap-output.txt 2>&1; then
     echo -e "${RED}❌ Bootstrap failed${NC}"
     echo "Output:"
     cat /tmp/bootstrap-output.txt
@@ -185,24 +190,19 @@ fi
 
 echo -e "${GREEN}✅ Ubuntu bootstrapped${NC}"
 
-# Step 4: Install dev tools (via jump-host)
+# Step 4: Install dev tools (direct SSH)
 echo -e "${YELLOW}[4/7]${NC} Installing development tools..."
 echo "  This will take 3-5 minutes (Docker installation)..."
 
-# Upload dev-tools script and dependencies
-ssh -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    sblanken@192.168.101.59 \
-    "scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null shared/configure/dev-tools.sh shared/lib/noninteractive.sh ubuntu@$VM_IP:/tmp/linus/" 2>/dev/null || {
+# Upload dev-tools script
+scp ${SSH_OPTS} shared/configure/dev-tools.sh shared/lib/noninteractive.sh ubuntu@$VM_IP:/tmp/linus/ 2>/dev/null || {
     echo -e "${RED}❌ Failed to upload dev-tools script${NC}"
     exit 1
 }
 
-# Execute dev-tools installation via jump-host
-if ! ssh -o StrictHostKeyChecking=no \
-       -o UserKnownHostsFile=/dev/null \
-       sblanken@192.168.101.59 \
-       "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@$VM_IP 'cd /tmp/linus && sudo bash dev-tools.sh'" > /tmp/dev-tools-output.txt 2>&1; then
+# Execute dev-tools installation
+if ! ssh ${SSH_OPTS} ubuntu@$VM_IP \
+     "cd /tmp/linus && sudo bash dev-tools.sh" > /tmp/dev-tools-output.txt 2>&1; then
     echo -e "${RED}❌ Dev tools installation failed${NC}"
     echo "Output:"
     cat /tmp/dev-tools-output.txt
@@ -216,21 +216,16 @@ fi
 
 echo -e "${GREEN}✅ Dev tools installed${NC}"
 
-# Step 5: Install base packages (via jump-host)
+# Step 5: Install base packages (direct SSH)
 echo -e "${YELLOW}[5/7]${NC} Installing base packages..."
 
-ssh -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    sblanken@192.168.101.59 \
-    "scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null shared/configure/base-packages.sh ubuntu@$VM_IP:/tmp/linus/" 2>/dev/null || {
+scp ${SSH_OPTS} shared/configure/base-packages.sh ubuntu@$VM_IP:/tmp/linus/ 2>/dev/null || {
     echo -e "${RED}❌ Failed to upload base-packages script${NC}"
     exit 1
 }
 
-if ! ssh -o StrictHostKeyChecking=no \
-       -o UserKnownHostsFile=/dev/null \
-       sblanken@192.168.101.59 \
-       "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@$VM_IP 'cd /tmp/linus && sudo bash base-packages.sh'" > /tmp/base-packages-output.txt 2>&1; then
+if ! ssh ${SSH_OPTS} ubuntu@$VM_IP \
+     "cd /tmp/linus && sudo bash base-packages.sh" > /tmp/base-packages-output.txt 2>&1; then
     echo -e "${RED}❌ Base packages installation failed${NC}"
     echo "Output:"
     cat /tmp/base-packages-output.txt
@@ -244,7 +239,7 @@ fi
 
 echo -e "${GREEN}✅ Base packages installed${NC}"
 
-# Step 6: Verify all installations (via jump-host)
+# Step 6: Verify all installations (direct SSH)
 echo -e "${YELLOW}[6/7]${NC} Verifying all installations..."
 
 verification_checks=(
@@ -263,14 +258,8 @@ for check in "${verification_checks[@]}"; do
     cmd="${check%%:*}"
     name="${check##*:}"
 
-    if ssh -o StrictHostKeyChecking=no \
-           -o UserKnownHostsFile=/dev/null \
-           sblanken@192.168.101.59 \
-           "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@$VM_IP '$cmd'" &>/dev/null; then
-        version=$(ssh -o StrictHostKeyChecking=no \
-                      -o UserKnownHostsFile=/dev/null \
-                      sblanken@192.168.101.59 \
-                      "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@$VM_IP '$cmd 2>&1 | head -1'") 
+    if ssh ${SSH_OPTS} ubuntu@$VM_IP "$cmd" &>/dev/null; then
+        version=$(ssh ${SSH_OPTS} ubuntu@$VM_IP "$cmd 2>&1 | head -1")
         echo -e "  ${GREEN}✅${NC} $name: ${version:0:50}"
     else
         echo -e "  ${RED}❌${NC} $name: NOT FOUND"
@@ -285,28 +274,19 @@ fi
 
 echo -e "${GREEN}✅ All tools verified${NC}"
 
-# Step 7: Final system check (via jump-host)
+# Step 7: Final system check (direct SSH)
 echo -e "${YELLOW}[7/7]${NC} Final system check..."
 
 # Check disk space
-disk_usage=$(ssh -o StrictHostKeyChecking=no \
-                 -o UserKnownHostsFile=/dev/null \
-                 sblanken@192.168.101.59 \
-                 "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@$VM_IP 'df -h / | tail -1 | awk \"{print \\$5}\"'")
+disk_usage=$(ssh ${SSH_OPTS} ubuntu@$VM_IP "df -h / | tail -1 | awk '{print \$5}'")
 echo "  Disk usage: $disk_usage"
 
 # Check memory
-mem_total=$(ssh -o StrictHostKeyChecking=no \
-                -o UserKnownHostsFile=/dev/null \
-                sblanken@192.168.101.59 \
-                "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@$VM_IP 'free -h | grep Mem | awk \"{print \\$2}\"'")
+mem_total=$(ssh ${SSH_OPTS} ubuntu@$VM_IP "free -h | grep Mem | awk '{print \$2}'")
 echo "  Total memory: $mem_total"
 
 # Check running services
-services_running=$(ssh -o StrictHostKeyChecking=no \
-                       -o UserKnownHostsFile=/dev/null \
-                       sblanken@192.168.101.59 \
-                       "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@$VM_IP 'systemctl list-units --type=service --state=running | grep -c running'")
+services_running=$(ssh ${SSH_OPTS} ubuntu@$VM_IP "systemctl list-units --type=service --state=running | grep -c running")
 echo "  Running services: $services_running"
 
 echo -e "${GREEN}✅ System check complete${NC}"
@@ -334,29 +314,23 @@ echo -e "${GREEN}✅ Snapshot 'pre-workload' saved${NC}"
 # Step 9: Run a workload (install nginx, create test files, write data)
 echo -e "${YELLOW}[9/12]${NC} Running workload..."
 
-# Install nginx via jump-host
-ssh -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    sblanken@192.168.101.59 \
-    "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@$VM_IP 'sudo apt-get update -qq && sudo apt-get install -y -qq nginx'" 2>/dev/null || {
+# Install nginx directly
+ssh ${SSH_OPTS} ubuntu@$VM_IP \
+    "sudo apt-get update -qq && sudo apt-get install -y -qq nginx" 2>/dev/null || {
     echo -e "${RED}❌ Failed to install nginx${NC}"
     exit 1
 }
 
-# Create test data via jump-host
-ssh -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    sblanken@192.168.101.59 \
-    "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@$VM_IP 'echo \"SNAPSHOT TEST DATA\" | sudo tee /var/www/html/test.txt'" 2>/dev/null || {
+# Create test data directly
+ssh ${SSH_OPTS} ubuntu@$VM_IP \
+    "echo \"SNAPSHOT TEST DATA\" | sudo tee /var/www/html/test.txt" 2>/dev/null || {
     echo -e "${RED}❌ Failed to create test data${NC}"
     exit 1
 }
 
-# Verify nginx is working via jump-host  
-ssh -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    sblanken@192.168.101.59 \
-    "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@$VM_IP 'curl -s http://localhost/test.txt'" 2>/dev/null || {
+# Verify nginx is working directly
+ssh ${SSH_OPTS} ubuntu@$VM_IP \
+    "curl -s http://localhost/test.txt" 2>/dev/null || {
     echo -e "${RED}❌ Failed to verify nginx installation${NC}"
     exit 1
 }
@@ -375,10 +349,7 @@ echo -e "${GREEN}✅ Snapshot 'pre-workload' restored${NC}"
 echo -e "${YELLOW}[11/12]${NC} Verifying snapshot restore..."
 
 # Check if nginx is removed after rollback
-nginx_check=$(ssh -o StrictHostKeyChecking=no \
-                   -o UserKnownHostsFile=/dev/null \
-                   sblanken@192.168.101.59 \
-                   "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@$VM_IP 'which nginx'" 2>/dev/null || echo "")
+nginx_check=$(ssh ${SSH_OPTS} ubuntu@$VM_IP "which nginx" 2>/dev/null || echo "")
 if [[ -n "$nginx_check" ]]; then
     echo -e "${RED}❌ Nginx should have been removed after restore${NC}"
     exit 1
@@ -390,10 +361,7 @@ echo -e "${GREEN}✅ Nginx correctly removed by snapshot restore${NC}"
 echo -e "${YELLOW}[12/12]${NC} Verifying base tools after restore..."
 
 for tool in curl git python3; do
-    if ssh -o StrictHostKeyChecking=no \
-           -o UserKnownHostsFile=/dev/null \
-           sblanken@192.168.101.59 \
-           "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@$VM_IP 'which $tool'" &>/dev/null; then
+    if ssh ${SSH_OPTS} ubuntu@$VM_IP "which $tool" &>/dev/null; then
         echo -e "  ${GREEN}✅${NC} $tool is present"
     else
         echo -e "  ${RED}❌${NC} $tool is missing"
@@ -504,19 +472,15 @@ for i in {1..2}; do
     fi
 done
 
-# Test DNS resolution between VMs via jump-host
-if ! ssh -o StrictHostKeyChecking=no \
-       -o UserKnownHostsFile=/dev/null \
-       sblanken@192.168.101.59 \
-       "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@$VM_IP 'getent hosts test-cluster-1 || ping -c1 $VM2_IP'" 2>/dev/null; then
+# Test DNS resolution between VMs via direct SSH
+if ! ssh ${SSH_OPTS} ubuntu@$VM_IP \
+     "getent hosts test-cluster-1 || ping -c1 $VM2_IP" 2>/dev/null; then
     echo -e "${RED}❌ DNS resolution failed between VMs${NC}"
     exit 1
 fi
 
-if ! ssh -o StrictHostKeyChecking=no \
-       -o UserKnownHostsFile=/dev/null \
-       sblanken@192.168.101.59 \
-       "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@$VM2_IP 'getent hosts test-cluster-2 || ping -c1 $VM3_IP'" 2>/dev/null; then
+if ! ssh ${SSH_OPTS} ubuntu@$VM2_IP \
+     "getent hosts test-cluster-2 || ping -c1 $VM3_IP" 2>/dev/null; then
     echo -e "${RED}❌ DNS resolution failed between VMs${NC}"
     exit 1
 fi
@@ -545,19 +509,13 @@ echo -e "${GREEN}✅ Phase 4 started${NC}"
 # Step 17: Run monitor-resource.sh during a load test on the remaining VM
 echo -e "${YELLOW}[17/19]${NC} Running resource monitoring with load test..."
 
-# Start monitoring in background via jump-host 
-ssh -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    sblanken@192.168.101.59 \
-    "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@$VM_IP 'sudo bash /tmp/monitor-resource.sh &' 2>/dev/null" &
+# Start monitoring in background via direct SSH
+ssh ${SSH_OPTS} ubuntu@$VM_IP "sudo bash /tmp/monitor-resource.sh &" 2>/dev/null &
 
-# Run a stress test (dd command) via jump-host
+# Run a stress test (dd command) via direct SSH
 echo -e "${YELLOW}[17/19]${NC} Running stress test..."
 
-ssh -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    sblanken@192.168.101.59 \
-    "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@$VM_IP 'dd if=/dev/zero of=/tmp/testfile bs=1M count=500 2>/dev/null' &" &
+ssh ${SSH_OPTS} ubuntu@$VM_IP "dd if=/dev/zero of=/tmp/testfile bs=1M count=500 2>/dev/null &" &
 
 # Give the monitoring a moment to start
 sleep 5
