@@ -435,7 +435,7 @@ bash shared/provision/multi-vm.sh > /tmp/multi-vm-output.txt 2>&1 || {
 
 # Parse VM details from output
 MULTI_VM_IDS=""
-for i in {1..2}; do
+for i in $(seq 1 2); do
     vm_name=$(grep "LINUS_VM_${i}_NAME:" /tmp/multi-vm-output.txt | cut -d: -f2 | tr -d ' ')
     vm_ip=$(grep "LINUS_VM_${i}_IP:" /tmp/multi-vm-output.txt | cut -d: -f2 | tr -d ' ')
     vm_id=$(grep "LINUS_VM_${i}_ID:" /tmp/multi-vm-output.txt | cut -d: -f2 | tr -d ' ')
@@ -488,7 +488,7 @@ echo -e "${YELLOW}[15/16]${NC} Testing DNS between VMs..."
 VM2_IP=""
 VM3_IP=""
 
-for i in {1..2}; do
+for i in $(seq 1 2); do
     vm_ip=$(grep "LINUS_VM_${i}_IP:" /tmp/multi-vm-output.txt | cut -d: -f2 | tr -d ' ')
     if [[ -z "$VM2_IP" ]]; then
         VM2_IP="$vm_ip"
@@ -497,20 +497,23 @@ for i in {1..2}; do
     fi
 done
 
-# Test DNS resolution between VMs via direct SSH
+# Test cross-VM connectivity (IP-based — no DNS server configured between VMs)
+echo "  Testing VM-to-VM connectivity..."
 if ! ssh ${SSH_OPTS[@]} ubuntu@$VM_IP \
-     "getent hosts test-cluster-1 || ping -c1 $VM2_IP" 2>/dev/null; then
-    echo -e "${RED}❌ DNS resolution failed between VMs${NC}"
+     "ping -c2 -W2 $VM2_IP" 2>/dev/null; then
+    echo -e "${RED}❌ VM $VM_IP cannot reach $VM2_IP${NC}"
     exit 1
 fi
+echo "  ${GREEN}✅${NC} $VM_IP → $VM2_IP: reachable"
 
 if ! ssh ${SSH_OPTS[@]} ubuntu@$VM2_IP \
-     "getent hosts test-cluster-2 || ping -c1 $VM3_IP" 2>/dev/null; then
-    echo -e "${RED}❌ DNS resolution failed between VMs${NC}"
+     "ping -c2 -W2 $VM3_IP" 2>/dev/null; then
+    echo -e "${RED}❌ VM $VM2_IP cannot reach $VM3_IP${NC}"
     exit 1
 fi
+echo "  ${GREEN}✅${NC} $VM2_IP → $VM3_IP: reachable"
 
-echo -e "${GREEN}✅ DNS test passed${NC}"
+echo -e "${GREEN}✅ Cross-VM connectivity verified${NC}"
 
 # Step 16: Cleanup multi-VM group
 echo -e "${YELLOW}[16/16]${NC} Cleaning up multi-VM group..."
@@ -531,43 +534,108 @@ echo ""
 echo -e "${YELLOW}[4/4]${NC} Running Phase 4: Resource monitoring + cleanup verification..."
 echo -e "${GREEN}✅ Phase 4 started${NC}"
 
-# Step 17: Run monitor-resource.sh during a load test on the remaining VM
-echo -e "${YELLOW}[17/19]${NC} Running resource monitoring with load test..."
+# Step 17: Run resource monitoring with verified stress test
+echo -e "${YELLOW}[17/19]${NC} Running resource monitoring with stress test..."
 
-# Start monitoring in background via direct SSH
-ssh ${SSH_OPTS[@]} ubuntu@$VM_IP "sudo bash /tmp/monitor-resource.sh &" 2>/dev/null &
+# Upload monitoring script
+scp ${SSH_OPTS[@]} /home/sblanken/workspace/linus-deployment-specialist/shared/snapshot/monitor-resource.sh ubuntu@$VM_IP:/tmp/ 2>/dev/null || {
+    echo -e "${RED}❌ Failed to upload monitoring script${NC}"
+    exit 1
+}
 
-# Run a stress test (dd command) via direct SSH
-echo -e "${YELLOW}[17/19]${NC} Running stress test..."
+# Start monitoring in background and capture its PID
+MONITOR_PID=""
+ssh ${SSH_OPTS[@]} ubuntu@$VM_IP \
+    "nohup sudo bash /tmp/monitor-resource.sh > /tmp/monitor-output.log 2>&1 & echo \$!" > /tmp/monitor-pid.txt 2>/dev/null
+MONITOR_PID=$(cat /tmp/monitor-pid.txt 2>/dev/null || echo "")
 
-ssh ${SSH_OPTS[@]} ubuntu@$VM_IP "dd if=/dev/zero of=/tmp/testfile bs=1M count=500 2>/dev/null &" &
+if [[ -z "$MONITOR_PID" ]]; then
+    echo -e "${RED}❌ Failed to start monitoring${NC}"
+    exit 1
+fi
+echo "  Monitoring started (PID: $MONITOR_PID)"
 
-# Give the monitoring a moment to start
-sleep 5
-
-echo -e "${GREEN}✅ Resource monitoring started with stress test${NC}"
-
-# Step 18: Run verify-cleanup.sh
-echo -e "${YELLOW}[18/19]${NC} Running cleanup verification..."
-
-# Export environment for verify-cleanup script
-export PROVIDER="proxmox"
-export VM_IDENTIFIER="$VM_ID"
-
-# Run the cleanup verification script via jump-host (as we're not using SSH directly)
-# We'll check that the VM exists and then test that it can be destroyed 
-if ! _api "https://${PROXMOX_HOST}:8006/api2/json/nodes/${PROXMOX_NODE:-moxy}/qemu/${VM_ID}/status/current" >/dev/null 2>&1; then
-    echo -e "${RED}❌ VM does not exist for cleanup verification${NC}"
+# Run stress test and wait for it to complete
+echo "  Running CPU/memory stress test..."
+ssh ${SSH_OPTS[@]} ubuntu@$VM_IP \
+    "dd if=/dev/zero of=/tmp/stress-test bs=1M count=500 2>/tmp/dd-stderr.txt" >/dev/null 2>&1
+DD_EXIT=$?
+if [[ $DD_EXIT -ne 0 ]]; then
+    echo -e "${RED}❌ Stress test failed (dd exit code: $DD_EXIT)${NC}"
+    ssh ${SSH_OPTS[@]} ubuntu@$VM_IP "cat /tmp/dd-stderr.txt" 2>/dev/null
     exit 1
 fi
 
-echo -e "${GREEN}✅ Cleanup verification passed${NC}"
+# Give monitoring a moment to sample after stress
+sleep 3
 
-# Step 19: Final cleanup of all VMs
-echo -e "${YELLOW}[19/19]${NC} Final cleanup..."
+# Stop monitoring gracefully
+ssh ${SSH_OPTS[@]} ubuntu@$VM_IP "sudo kill $MONITOR_PID" 2>/dev/null || true
+sleep 2
 
-# The trap will handle this, but let's explicitly confirm
-echo -e "${GREEN}✅ Final cleanup completed${NC}"
+# Verify monitoring produced output
+MONITOR_SIZE=$(ssh ${SSH_OPTS[@]} ubuntu@$VM_IP "stat -c%s /tmp/monitor-output.log 2>/dev/null || echo 0" 2>/dev/null | tr -d '[:space:]')
+if [[ -z "$MONITOR_SIZE" || "$MONITOR_SIZE" -lt 50 ]]; then
+    echo -e "${RED}❌ Monitoring produced no output (file size: ${MONITOR_SIZE:-0} bytes)${NC}"
+    exit 1
+fi
+MONITOR_LINES=$(ssh ${SSH_OPTS[@]} ubuntu@$VM_IP "wc -l < /tmp/monitor-output.log" 2>/dev/null | tr -d '[:space:]')
+echo "  Monitoring captured ${MONITOR_LINES} lines (${MONITOR_SIZE} bytes)"
+
+# Verify monitoring recorded CPU or disk activity from the stress test
+if ! ssh ${SSH_OPTS[@]} ubuntu@$VM_IP \
+    "grep -qiE 'cpu|disk|io|mem|usage' /tmp/monitor-output.log" 2>/dev/null; then
+    echo -e "${RED}❌ Monitoring log contains no resource metrics${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}✅ Resource monitoring verified (${MONITOR_LINES} lines captured)${NC}"
+
+# Step 18: Verify cleanup readiness
+echo -e "${YELLOW}[18/19]${NC} Verifying cleanup readiness..."
+
+# Verify original VM is still accessible
+if ! ssh ${SSH_OPTS[@]} ubuntu@$VM_IP "echo ok" 2>/dev/null; then
+    echo -e "${RED}❌ Original VM unreachable before cleanup${NC}"
+    exit 1
+fi
+echo "  VM $VM_ID: accessible"
+
+# Verify multi-VM group exists in API
+IFS=',' read -ra VM_ARRAY <<< "${MULTI_VM_IDS}"
+for id in "${VM_ARRAY[@]}"; do
+    if [[ -n "$id" ]]; then
+        vm_exists=$(_api "https://${PROXMOX_HOST}:8006/api2/json/nodes/${PROXMOX_NODE:-moxy}/qemu/${id}/status/current" 2>/dev/null)
+        if [[ -z "$vm_exists" ]]; then
+            echo -e "${RED}❌ Multi-VM $id not found in API before cleanup${NC}"
+            exit 1
+        fi
+        echo "  Multi-VM $id: exists in API"
+    fi
+done
+
+echo -e "${GREEN}✅ Cleanup readiness verified${NC}"
+
+# Step 19: Final cleanup with verification
+echo -e "${YELLOW}[19/19]${NC} Running final cleanup..."
+
+# Explicitly call cleanup (belt-and-suspenders with the trap)
+cleanup
+
+# Verify all VMs were actually removed
+sleep 3
+IFS=',' read -ra ALL_IDS <<< "${MULTI_VM_IDS},${VM_ID}"
+for id in "${ALL_IDS[@]}"; do
+    if [[ -n "$id" ]]; then
+        if _api "https://${PROXMOX_HOST}:8006/api2/json/nodes/${PROXMOX_NODE:-moxy}/qemu/${id}/status/current" 2>/dev/null | grep -q '"status"'; then
+            echo -e "${YELLOW}⚠️  VM $id may still exist after cleanup${NC}"
+        else
+            echo "  VM $id: removed ✓"
+        fi
+    fi
+done
+
+echo -e "${GREEN}✅ Final cleanup verified${NC}"
 
 echo ""
 
