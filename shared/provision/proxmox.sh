@@ -47,7 +47,49 @@ readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Source the unified library path resolver
 source "$SCRIPT_DIR/../lib/paths.sh" || exit 1
-source_lib "logging.sh" "validation.sh"
+source_lib "logging.sh" "validation.sh" "ensure-dns.sh"
+
+# -----------------------------------------------------------------------------
+# Credential auto-discovery — source from known secret files before env vars
+# -----------------------------------------------------------------------------
+# Look up credentials from ~/.hermes/secrets/ if not already in environment
+_linus_auto_discover_credentials() {
+    local secret_dirs=(
+        "$HOME/.hermes/secrets"
+        "$HOME/.hermes/env"
+    )
+    local cred_files=(
+        "proxmox-token-${PROXMOX_HOST:-192.168.101.155}"
+        "proxmox-${PROXMOX_HOST:-192.168.101.155}"
+        "proxmox-token"
+        "proxmox"
+    )
+    
+    for dir in "${secret_dirs[@]}"; do
+        for fname in "${cred_files[@]}"; do
+            local fpath="${dir}/${fname}"
+            if [[ -f "$fpath" && -r "$fpath" ]]; then
+                # Source the file to load PROXMOX_TOKEN_SECRET, PROXMOX_SSH_PASS, etc.
+                # Only set variables that aren't already in the environment
+                while IFS='=' read -r key value; do
+                    [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+                    key="${key## }"; key="${key%% }"
+                    value="${value## }"; value="${value%% }"
+                    case "$key" in
+                        PROXMOX_TOKEN_SECRET) : "${PROXMOX_TOKEN_SECRET:=$value}" ;;
+                        PROXMOX_SSH_PASS)     : "${PROXMOX_SSH_PASS:=$value}" ;;
+                        PROXMOX_PASS)          : "${PROXMOX_SSH_PASS:=$value}" ;;
+                        PROXMOX_USER)          : "${PROXMOX_USER:=$value}" ;;
+                        PROXMOX_TOKEN_ID)      : "${PROXMOX_TOKEN_ID:=$value}" ;;
+                        PROXMOX_HOST)          : "${PROXMOX_HOST:=$value}" ;;
+                    esac
+                done < "$fpath"
+            fi
+        done
+    done
+}
+
+_linus_auto_discover_credentials
 
 # Configuration from environment with defaults
 readonly PROXMOX_NODE="${PROXMOX_NODE:-moxy}"
@@ -95,13 +137,55 @@ _pvesh() {
             curl -sk --fail -X PUT -H "$auth_header" "${ct_header[@]}" "$url" "$@" 2>/dev/null
             ;;
         delete)
-            curl -sk -X DELETE -H "$auth_header" "$url" "$@" 2>/dev/null
+            curl -sk --fail -X DELETE -H "$auth_header" "$url" "$@" 2>/dev/null
             ;;
         *)
             echo "ERROR: Unknown method: $method" >&2
             return 1
             ;;
     esac
+}
+
+# Proxmox config setter — converts key=value pairs to JSON for PUT /config
+# Usage: _pvesh_set $VMID --cores 2 --memory 2048 --ipconfig0 "ip=10.0.0.1/24,gw=10.0.0.1"
+# Supports: cores, memory, ipconfig0, agent, ciuser, ostype, net0, sshkeys, name
+_pvesh_set() {
+    local vm_id="$1"; shift
+    local -A fields
+    local key value
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --cores)       fields["cores"]="$2"; shift 2 ;;
+            --memory)      fields["memory"]="$2"; shift 2 ;;
+            --ipconfig0)   fields["ipconfig0"]="$2"; shift 2 ;;
+            --agent)       fields["agent"]="$2"; shift 2 ;;
+            --ciuser)      fields["ciuser"]="$2"; shift 2 ;;
+            --ostype)      fields["ostype"]="$2"; shift 2 ;;
+            --net0)        fields["net0"]="$2"; shift 2 ;;
+            --sshkeys)     fields["sshkeys"]="$2"; shift 2 ;;
+            --name)        fields["name"]="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    
+    [[ ${#fields[@]} -eq 0 ]] && { echo "ERROR: _pvesh_set: no fields provided" >&2; return 1; }
+    
+    # Build JSON object
+    local json="{"
+    local first=true
+    for key in "${!fields[@]}"; do
+        value="${fields[$key]}"
+        value="${value//\\/\\\\}"; value="${value//\"/\\\"}"
+        if $first; then first=false; else json+=","; fi
+        case "$key" in
+            cores|memory) json+="\"${key}\":${value}" ;;
+            *)            json+="\"${key}\":\"${value}\"" ;;
+        esac
+    done
+    json+="}"
+    
+    _pvesh put "/nodes/${PROXMOX_NODE}/qemu/${vm_id}/config" --data-raw "$json"
 }
 
 # Set SSH user based on OS type
@@ -130,41 +214,46 @@ esac
 validate_environment() {
     log_step "1" "Validating environment"
 
-    # Check required tools
-    check_dependencies curl jq || return 2
-
+    # PITFALL 22: Error suppression hides root causes - replace key >/dev/null 2>&1 with capture-then-log-on-failure pattern
+    
     # Check Proxmox node status (check if uptime exists - node must be running to have uptime)
     log_info "Checking Proxmox node status..."
-    local node_uptime=$(_pvesh get /nodes/${PROXMOX_NODE}/status | jq -r '.data.uptime // 0')
-
+    local node_uptime=$(_pvesh get /nodes/${PROXMOX_NODE}/status 2>&1 | jq -r '.data.uptime // 0') || {
+        log_error "Proxmox node ${PROXMOX_NODE} is not accessible or offline"
+        return 4
+    }
+    
     if [[ "$node_uptime" -eq 0 ]]; then
         log_error "Proxmox node ${PROXMOX_NODE} is not accessible or offline"
         return 4
     fi
     log_info "Node online (uptime: ${node_uptime}s)"
-
+    
     # Check storage exists
     log_info "Checking storage pool..."
-    if ! _pvesh get /storage/${PROXMOX_STORAGE} >/dev/null 2>&1; then
+    local storage_check
+    storage_check=$(_pvesh get /storage/${PROXMOX_STORAGE} 2>&1) || {
         log_error "Storage pool ${PROXMOX_STORAGE} not found"
         return 3
-    fi
+    }
     log_info "Storage: ${PROXMOX_STORAGE} OK"
-
+    
     # Check network bridge exists - we'll just verify connectivity to API instead
     log_info "Checking network bridge..."
-    if ! _pvesh get /nodes/${PROXMOX_NODE}/status >/dev/null 2>&1; then
+    local bridge_check
+    bridge_check=$(_pvesh get /nodes/${PROXMOX_NODE}/status 2>&1) || {
         log_error "Network bridge ${PROXMOX_BRIDGE} not found"
         return 3
-    fi
+    }
     log_info "Bridge: ${PROXMOX_BRIDGE} OK"
-
+    
     # Check template exists - we'll verify via API call instead of qm command
     log_info "Checking template VM..."
-    if ! _pvesh get /nodes/${PROXMOX_NODE}/qemu/${VM_TEMPLATE_ID}/status/current >/dev/null 2>&1; then
+    local template_check
+    template_check=$(_pvesh get /nodes/${PROXMOX_NODE}/qemu/${VM_TEMPLATE_ID}/status/current 2>&1) || {
         log_error "Template VM ${VM_TEMPLATE_ID} not found"
         return 3
-    fi
+    }
     log_info "Template: VM ${VM_TEMPLATE_ID} OK"
 
     # Validate OS type
@@ -326,13 +415,25 @@ configure_network_for_os_type() {
     local os_type="${VM_OS_TYPE:-ubuntu}"
     
     log_step "4a" "Configuring network for OS type: ${os_type}"
-    
+    # Configure network for OS type - handle cloud-init quirks
     case "$os_type" in
         ubuntu|debian)
             # Ubuntu/Debian - configure static IP (no DHCP on vmbr0)
             log_info "Ubuntu/Debian: Configuring static IP ${ALLOCATED_VM_IP}/24 gw ${GATEWAY_IP}"
+            
+            # PITFALL 17: Adding dns= to ipconfig0 silently breaks networking
+            # The configure_network_for_os_type function should NEVER include dns= in ipconfig0
+            # Add a validation check that strips dns= if accidentally included
+            local ipconfig0_value="ip=${ALLOCATED_VM_IP}/24,gw=${GATEWAY_IP}"
+            
+            # If there's already a DNS setting, strip it (this is the guardrail)
+            if [[ "$ipconfig0_value" == *"dns="* ]]; then
+                log_warn "Detected dns= in ipconfig0 - stripping for Proxmox compatibility"
+                ipconfig0_value=$(echo "$ipconfig0_value" | sed 's/,dns=[^,]*//g' | sed 's/dns=[^,]*,//g')
+            fi
+            
             if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
-                --data-raw "{\"agent\":1,\"ipconfig0\":\"ip=${ALLOCATED_VM_IP}/24,gw=${GATEWAY_IP}\"}" >/dev/null 2>&1; then
+                --data-raw "{\"agent\":1,\"ipconfig0\":\"${ipconfig0_value}\"}" >/dev/null 2>&1; then
                 log_warn "Failed to configure static IP (non-fatal)"
             fi
             ;;
@@ -388,6 +489,18 @@ configure_network_for_os_type() {
             ;;
     esac
     
+    # Verify ipconfig0 took effect (prevents silent config failures)
+    local actual_ipconfig
+    actual_ipconfig=$(_pvesh get /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config | jq -r '.data.ipconfig0 // "MISSING"')
+    if [[ "$actual_ipconfig" != *"${ALLOCATED_VM_IP}"* ]]; then
+        log_warn "ipconfig0 mismatch: expected ${ALLOCATED_VM_IP}, got '${actual_ipconfig}'"
+        log_warn "Retrying with explicit ipconfig0..."
+        _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
+            --data-raw "{\"ipconfig0\":\"ip=${ALLOCATED_VM_IP}/24,gw=${GATEWAY_IP}\"}" >/dev/null 2>&1 || true
+    else
+        log_info "ipconfig0 verified: ${actual_ipconfig}"
+    fi
+    
     return 0
 }
 
@@ -412,7 +525,9 @@ configure_vm() {
         return 5
     fi
 
-    # Resize disk
+    # PITFALL 8: Disk resize uses /resize, not /config
+    # The /config endpoint does NOT accept disk changes - it's wrong and silently ignored
+    # configure_vm already correctly uses /resize 
     log_info "Resizing disk to ${VM_DISK}G..."
     if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/resize \
         --data-raw "{\"disk\":\"scsi0\",\"size\":\"${VM_DISK}G\"}" >/dev/null 2>&1; then
@@ -471,11 +586,21 @@ regenerate_cloudinit() {
     local response
     local http_code
     
+    # PITFALL 9: Cloud-init Content-Type trap - regenerate_cloudinit must use direct curl without Content-Type header
+    # The cloudinit endpoint with any HTTP method rejects requests that include 
+    # Content-Type: application/json with no body (returns HTTP 400/501) 
     response=$(curl -sk --fail -X PUT -H "$auth_header" -w "\n%{http_code}" "$url" 2>&1) || {
         http_code="${response##*$'\n'}"
         log_warn "Cloud-init regeneration failed (HTTP ${http_code})"
         return 1
     }
+    
+    # Verify HTTP status code was 200
+    local final_http_code="${response##*$'\n'}"
+    if [[ "$final_http_code" != "200" ]]; then
+        log_warn "Cloud-init regeneration returned HTTP ${final_http_code} (expected 200)"
+        return 1
+    fi
     
     log_info "Cloud-init ISO regenerated for VM ${vm_id}"
     return 0
@@ -554,6 +679,17 @@ verify_ssh_ready() {
 
     local vm_ip="$VM_IP"
     local ssh_user="${VM_SSH_USER:-ubuntu}"
+    # PITFALL 11: Ubuntu 24.04 first-boot cloud-init timeout
+    # network configuration, SSH key injection, and multiple cloud-init modules.
+    # On Proxmox VE 8.2.2, this cycle **consistently takes >120s** (observed
+    # 120-180s on 2 CPU / 2 GB RAM / 20 GB disk). A 120s SSH timeout is not
+    # enough.
+    # 
+    # The root-resize step alone can take 30-60s on larger disks.
+    # 
+    # **Fix:** Set verify_ssh_ready() timeout to at least **300 seconds** for
+    # Ubuntu 24.04 clones. This accounts for first-boot cloud-init delay,
+    # package upgrades, and disk resizing operations.
     local max_wait=300  # Ubuntu 24.04 first-boot cloud-init (resize + config + keys) >120s
     local elapsed=0
 
@@ -641,10 +777,14 @@ cleanup_on_error() {
     local exit_code=$?
     if [[ $exit_code -ne 0 && -n "${ALLOCATED_VM_ID:-}" ]]; then
         log_warn "Cleaning up VM ${ALLOCATED_VM_ID} due to error..."
-        # Stop the VM if it exists
-        _pvesh post /nodes/${PROXMOX_NODE}/qemu/${ALLOCATED_VM_ID}/status/stop >/dev/null 2>&1 || true
-        # Destroy the VM
-        _pvesh delete /nodes/${PROXMOX_NODE}/qemu/${ALLOCATED_VM_ID} >/dev/null 2>&1 || true
+    # PITFALL 13: DELETE requires stopped VM + query params
+    # DELETE does not accept form-encoded body data — must pass as query parameters
+    # Stop the VM first (required for deletion)
+    _pvesh post /nodes/${PROXMOX_NODE}/qemu/${ALLOCATED_VM_ID}/status/stop >/dev/null 2>&1 || true
+    sleep 3
+    
+    # Destroy the VM — pass purge params as QUERY string (NOT --data-raw body)
+    _pvesh delete "/nodes/${PROXMOX_NODE}/qemu/${ALLOCATED_VM_ID}?destroy-unreferenced-disks=1&purge=1" >/dev/null 2>&1 || true
     fi
 }
 

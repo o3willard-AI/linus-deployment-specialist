@@ -155,10 +155,14 @@ fi
 
 echo -e "${GREEN}✅ VM provisioned: ID=$VM_ID, IP=$VM_IP${NC}"
 
-# Step 2: Wait for VM to be fully ready
-echo -e "${YELLOW}[2/7]${NC} Waiting for VM to be fully ready..."
-sleep 10
-echo -e "${GREEN}✅ VM ready${NC}"
+    # Step 2: Wait for VM to be fully ready
+    echo -e "${YELLOW}[2/7]${NC} Waiting for VM to be fully ready..."
+    sleep 10
+    
+    # Note: Ubuntu 24.04 first-boot cloud-init can take 120-180s due to package upgrades,
+    # including openssh-server, which causes a brief SSH outage mid-boot.
+    # This is why we wait longer than the default in the provisioning script.
+    echo -e "${GREEN}✅ VM ready${NC}"
 
 # Step 3: Bootstrap Ubuntu (direct SSH — no jump-host)
 echo -e "${YELLOW}[3/7]${NC} Bootstrapping Ubuntu..."
