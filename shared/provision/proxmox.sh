@@ -126,24 +126,43 @@ _pvesh() {
         fi
     done
     
+    # Capture stderr to a temp file so we can log it on failure
+    local _errfile
+    _errfile=$(mktemp) || { echo "ERROR: _pvesh: cannot create temp file" >&2; return 1; }
+    
+    local _exit_code=0
     case "$method" in
         get)
-            curl -sk -H "$auth_header" "$url" "$@" 2>/dev/null
+            curl -sk -H "$auth_header" "$url" "$@" 2>"$_errfile"
+            _exit_code=$?
             ;;
         post)
-            curl -sk --fail -X POST -H "$auth_header" "${ct_header[@]}" "$url" "$@" 2>/dev/null
+            curl -sk --fail -X POST -H "$auth_header" "${ct_header[@]}" "$url" "$@" 2>"$_errfile"
+            _exit_code=$?
             ;;
         put)
-            curl -sk --fail -X PUT -H "$auth_header" "${ct_header[@]}" "$url" "$@" 2>/dev/null
+            curl -sk --fail -X PUT -H "$auth_header" "${ct_header[@]}" "$url" "$@" 2>"$_errfile"
+            _exit_code=$?
             ;;
         delete)
-            curl -sk --fail -X DELETE -H "$auth_header" "$url" "$@" 2>/dev/null
+            curl -sk --fail -X DELETE -H "$auth_header" "$url" "$@" 2>"$_errfile"
+            _exit_code=$?
             ;;
         *)
             echo "ERROR: Unknown method: $method" >&2
+            rm -f "$_errfile"
             return 1
             ;;
     esac
+    
+    # On failure, log the curl stderr for diagnosis
+    if [[ $_exit_code -ne 0 ]]; then
+        local _errmsg
+        _errmsg=$(<"$_errfile")
+        [[ -n "$_errmsg" ]] && echo "[ERROR] _pvesh $method $path: $_errmsg" >> "${LINUS_LOG_FILE:-/tmp/linus.log}"
+    fi
+    rm -f "$_errfile"
+    return $_exit_code
 }
 
 # Proxmox config setter — converts key=value pairs to JSON for PUT /config
