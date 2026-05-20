@@ -554,7 +554,10 @@ configure_vm() {
         return 5
     fi
 
-    # Configure SSH key access
+    # Configure SSH key access — two-tier: API first, sshpass fallback
+    # PITFALL 23: Proxmox API requires URL-encoded sshkeys. Sending raw key
+    # content fails with HTTP 400 "invalid urlencoded string". Pre-encode with
+    # Python's urllib.parse.quote(key, safe='') before JSON serialization.
     log_info "Configuring SSH key access..."
     local ssh_key_file=""
     for candidate in ~/.ssh/id_ed25519_qemu_test.pub ~/.ssh/id_ed25519.pub ~/.ssh/id_rsa.pub; do
@@ -565,15 +568,27 @@ configure_vm() {
     done
     
     if [[ -n "$ssh_key_file" ]]; then
-        local ssh_key_content
+        local ssh_key_content encoded_key
         ssh_key_content=$(cat "$ssh_key_file" | tr -d '\n')
-        # Use qm set via SSH (handles encoding correctly, unlike the API)
-        if sshpass -p "${PROXMOX_SSH_PASS:-}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
-            "root@${PROXMOX_HOST}" "printf '%s' '${ssh_key_content}' > /tmp/linus-key-${vm_id}.pub && qm set ${vm_id} --sshkeys /tmp/linus-key-${vm_id}.pub && rm -f /tmp/linus-key-${vm_id}.pub" 2>/dev/null; then
-            log_info "SSH key injected from ${ssh_key_file}"
+        # URL-encode the key: spaces→%20, +→%2B, /→%2F
+        encoded_key=$(python3 -c "import urllib.parse; print(urllib.parse.quote(open('${ssh_key_file}').read().strip(), safe=''))" 2>/dev/null) || encoded_key=""
+        
+        # Tier 1: API-based injection (works without Proxmox host SSH access)
+        if [[ -n "$encoded_key" ]] && _pvesh_set "$vm_id" --sshkeys "$encoded_key" 2>/dev/null; then
+            log_info "SSH key injected via API from ${ssh_key_file}"
+        # Tier 2: Fall back to sshpass + qm set (requires PROXMOX_SSH_PASS)
+        elif [[ -n "${PROXMOX_SSH_PASS:-}" ]]; then
+            log_info "API key injection failed, falling back to sshpass..."
+            if sshpass -p "${PROXMOX_SSH_PASS}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+                "root@${PROXMOX_HOST}" "printf '%s' '${ssh_key_content}' > /tmp/linus-key-${vm_id}.pub && qm set ${vm_id} --sshkeys /tmp/linus-key-${vm_id}.pub && rm -f /tmp/linus-key-${vm_id}.pub" 2>/dev/null; then
+                log_info "SSH key injected via sshpass from ${ssh_key_file}"
+            else
+                log_warn "SSH key injection failed (both API and sshpass)"
+                log_warn "VM will be reachable by ping but not SSH"
+            fi
         else
-            log_warn "SSH key injection failed (SSH to Proxmox host unavailable)"
-            log_warn "VM will be reachable by ping but not SSH — set PROXMOX_SSH_PASS for key injection"
+            log_warn "API key injection failed and PROXMOX_SSH_PASS not set"
+            log_warn "VM will be reachable by ping but not SSH"
         fi
     else
         log_warn "No SSH public key found (~/.ssh/id_*.pub) - SSH access will not work"
