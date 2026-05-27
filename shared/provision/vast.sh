@@ -56,6 +56,7 @@ readonly VAST_IMAGE="${VAST_IMAGE:-nvidia/cuda:12.4.0-devel-ubuntu22.04}"
 readonly VAST_API_KEY_NAME="${VAST_API_KEY_NAME:-linus-inference}"
 
 # Instance state (populated during provisioning)
+ALLOCATED_OFFER_ID=""
 ALLOCATED_CONTRACT_ID=""
 ALLOCATED_SSH_HOST=""
 ALLOCATED_SSH_PORT=""
@@ -193,3 +194,253 @@ validate_environment() {
     log_success "Environment validation passed"
     return 0
 }
+
+# -----------------------------------------------------------------------------
+# Function: search_offers
+# -----------------------------------------------------------------------------
+
+search_offers() {
+    log_step "2" "Searching Vast.ai offers"
+
+    local gpu_filter="gpu_name=${VAST_GPU_NAME} num_gpus=${VAST_NUM_GPUS} verified=true rentable=true direct_port_count>=1"
+    local reliability_filter="reliability>=${VAST_MIN_RELIABILITY}"
+
+    log_info "Filters: ${gpu_filter} ${reliability_filter}"
+
+    local sort_flag
+    case "$VAST_SORT_STRATEGY" in
+        cheapest) sort_flag="dph_total" ;;
+        fastest)  sort_flag="dlperf-" ;;
+        *)        sort_flag="dlperf_usd-" ;;
+    esac
+
+    local search_output
+    search_output=$(vastai search offers "${gpu_filter} ${reliability_filter}" -o "$sort_flag" --limit 10 --raw 2>/dev/null) || {
+        log_error "Offer search failed. Check VAST_API_KEY and network."
+        return 4
+    }
+
+    if [[ -z "$search_output" || "$search_output" == "[]" ]]; then
+        log_error "No offers match: GPU=${VAST_GPU_NAME} reliability>=${VAST_MIN_RELIABILITY}"
+        return 5
+    fi
+
+    local offer_id
+    offer_id=$(echo "$search_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['id'])" 2>/dev/null) || true
+
+    if [[ -z "$offer_id" ]]; then
+        log_error "Failed to parse offer ID from search results"
+        return 5
+    fi
+
+    ALLOCATED_OFFER_ID="$offer_id"
+    log_success "Selected offer: $offer_id"
+    return 0
+}
+
+# -----------------------------------------------------------------------------
+# Function: create_instance
+# -----------------------------------------------------------------------------
+
+create_instance() {
+    log_step "3" "Creating Vast instance"
+
+    local offer_id="$ALLOCATED_OFFER_ID"
+    local onstart_template="$SCRIPT_DIR/../templates/onstart-vast.sh"
+
+    local onstart_cmd
+    if [[ -f "$onstart_template" ]]; then
+        onstart_cmd=$(CUDA_ARCH="$VAST_CUDA_ARCH" bash "$onstart_template" 2>/dev/null | tr '\n' ';') || true
+    fi
+
+    if [[ -z "$onstart_cmd" ]]; then
+        log_warn "Onstart template not found, using inline build command"
+        onstart_cmd="apt-get update -qq && apt-get install -y -qq cmake && mkdir -p /workspace && cd /workspace && git clone --depth 1 https://github.com/ggml-org/llama.cpp && cd llama.cpp && cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=${VAST_CUDA_ARCH} && cmake --build build --config Release -j\$(nproc) && echo BUILD_DONE"
+    fi
+
+    log_info "Creating instance from offer ${offer_id}..."
+    local disk_gb="${VAST_MIN_DISK:-80}"
+
+    local create_output
+    create_output=$(vastai create instance "$offer_id" \
+        --image "$VAST_IMAGE" \
+        --disk "$disk_gb" \
+        --onstart-cmd "$onstart_cmd" \
+        --ssh --direct 2>&1) || {
+        log_error "Instance creation failed: $create_output"
+        return 5
+    }
+
+    local contract_id
+    contract_id=$(echo "$create_output" | grep -oP 'contract.*?(\d+)' | grep -oP '\d+' | head -1) || true
+    if [[ -z "$contract_id" ]]; then
+        contract_id=$(echo "$create_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('contract_id',''))" 2>/dev/null) || true
+    fi
+
+    if [[ -z "$contract_id" ]]; then
+        log_error "Failed to parse contract ID from: $create_output"
+        return 5
+    fi
+
+    ALLOCATED_CONTRACT_ID="$contract_id"
+    log_success "Instance created: contract $contract_id"
+    return 0
+}
+
+# -----------------------------------------------------------------------------
+# Function: wait_for_running
+# -----------------------------------------------------------------------------
+
+wait_for_running() {
+    log_step "4" "Waiting for instance to reach 'running' state"
+
+    local contract_id="$ALLOCATED_CONTRACT_ID"
+    local max_wait=600
+    local elapsed=0
+
+    while [[ $elapsed -lt $max_wait ]]; do
+        local status
+        status=$(vastai show instance "$contract_id" 2>/dev/null | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print(d.get('status', 'unknown'))
+" 2>/dev/null) || status="unknown"
+
+        case "$status" in
+            running)
+                log_success "Instance running (${elapsed}s)"
+                return 0
+                ;;
+            created)
+                if [[ $elapsed -gt 120 ]]; then
+                    local logs
+                    logs=$(vastai logs "$contract_id" 2>/dev/null) || true
+                    if [[ -z "$logs" ]]; then
+                        log_error "Instance stuck at 'created' with no logs — likely CDI/GPU passthrough failure"
+                        return 5
+                    fi
+                fi
+                ;;
+        esac
+
+        sleep 10
+        ((elapsed+=10))
+        if [[ $((elapsed % 60)) -eq 0 ]]; then
+            log_info "Waiting... (${elapsed}s/${max_wait}s, status=$status)"
+        fi
+    done
+
+    log_error "Instance did not reach 'running' within ${max_wait}s"
+    return 6
+}
+
+# -----------------------------------------------------------------------------
+# Function: wait_for_ssh
+# -----------------------------------------------------------------------------
+
+wait_for_ssh() {
+    log_step "5" "Waiting for SSH access"
+
+    local contract_id="$ALLOCATED_CONTRACT_ID"
+    local max_wait=120
+    local elapsed=0
+
+    local instance_json
+    instance_json=$(vastai show instance "$contract_id" 2>/dev/null) || true
+
+    local ssh_host ssh_port
+    ssh_host=$(echo "$instance_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('ssh_host',''))" 2>/dev/null) || true
+    ssh_port=$(echo "$instance_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('ssh_port',''))" 2>/dev/null) || true
+
+    if [[ -z "$ssh_host" || -z "$ssh_port" ]]; then
+        log_error "Failed to parse SSH details"
+        return 6
+    fi
+
+    ALLOCATED_SSH_HOST="$ssh_host"
+    ALLOCATED_SSH_PORT="$ssh_port"
+    ALLOCATED_PROXY_PORT="$((ssh_port + 1))"
+
+    log_info "SSH: ${ssh_host}:${ssh_port} (proxy: ${ALLOCATED_PROXY_PORT})"
+
+    local ssh_key=""
+    for candidate in ~/.ssh/vast-ai-inference ~/.ssh/id_ed25519 ~/.ssh/id_rsa; do
+        if [[ -f "$candidate" ]]; then
+            ssh_key="$candidate"
+            break
+        fi
+    done
+
+    local ssh_args=(-o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+    [[ -n "$ssh_key" ]] && ssh_args+=(-i "$ssh_key")
+
+    while [[ $elapsed -lt $max_wait ]]; do
+        if ssh "${ssh_args[@]}" -p "$ssh_port" "root@${ssh_host}" "echo ok" >/dev/null 2>&1; then
+            log_success "SSH ready at ${ssh_host}:${ssh_port} (${elapsed}s)"
+            return 0
+        fi
+        sleep 5
+        ((elapsed+=5))
+        if [[ $((elapsed % 30)) -eq 0 ]]; then
+            log_info "Waiting for SSH... (${elapsed}s/${max_wait}s)"
+        fi
+    done
+
+    log_error "SSH not accessible after ${max_wait}s"
+    return 6
+}
+
+# -----------------------------------------------------------------------------
+# Function: output_result
+# -----------------------------------------------------------------------------
+
+output_result() {
+    log_step "6" "Generating output"
+
+    linus_success \
+        "CONTRACT_ID:${ALLOCATED_CONTRACT_ID}" \
+        "SSH_HOST:${ALLOCATED_SSH_HOST}" \
+        "SSH_PORT:${ALLOCATED_SSH_PORT}" \
+        "PROXY_PORT:${ALLOCATED_PROXY_PORT}" \
+        "GPU:${VAST_GPU_NAME}" \
+        "CUDA_ARCH:${VAST_CUDA_ARCH}" \
+        "IMAGE:${VAST_IMAGE}"
+}
+
+# -----------------------------------------------------------------------------
+# Function: cleanup_on_error
+# -----------------------------------------------------------------------------
+
+cleanup_on_error() {
+    local exit_code=$?
+    if [[ $exit_code -ne 0 && -n "${ALLOCATED_CONTRACT_ID:-}" ]]; then
+        log_warn "Cleaning up instance ${ALLOCATED_CONTRACT_ID} due to error..."
+        vastai destroy instance "$ALLOCATED_CONTRACT_ID" --yes 2>/dev/null || true
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# Main
+# -----------------------------------------------------------------------------
+
+main() {
+    log_header "Linus Vast GPU Provisioning"
+
+    trap cleanup_on_error EXIT
+
+    validate_environment || exit $?
+    search_offers || exit $?
+    create_instance || exit $?
+    wait_for_running || exit $?
+    wait_for_ssh || exit $?
+    output_result
+
+    trap - EXIT
+    log_success "GPU instance provisioning completed successfully"
+    return 0
+}
+
+# Only run main if script is executed (not sourced)
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
