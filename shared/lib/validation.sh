@@ -298,3 +298,34 @@ validate_vm_spec() {
     log_debug "VM specification valid: $provider/$os, ${cpu}CPU, ${ram}MB RAM, ${disk}GB disk"
     return 0
 }
+
+# -----------------------------------------------------------------------------
+# GPU Validation (Vast provider)
+# -----------------------------------------------------------------------------
+
+# Source GPU reference tables from vast-sizing.sh
+_VALIDATION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -z "${LINUS_VAST_SIZING_LOADED:-}" ]]; then
+    source "${_VALIDATION_LIB_DIR}/vast-sizing.sh"
+fi
+
+# Validate GPU model name and output CUDA architecture flag
+# Usage: arch=$(validate_gpu_type "RTX_3090") || exit 1
+# Returns: 0 on success (echoes arch to stdout), 1 on unknown GPU
+validate_gpu_type() {
+    local gpu_name="$1"
+
+    if [[ -z "$gpu_name" ]]; then
+        log_error "GPU name is required (e.g., RTX_3090, H100)"
+        return 1
+    fi
+
+    local arch="${GPU_ARCH[$gpu_name]:-}"
+    if [[ -z "$arch" ]]; then
+        log_error "Unknown GPU: $gpu_name"
+        return 1
+    fi
+
+    echo "$arch"
+    return 0
+}
