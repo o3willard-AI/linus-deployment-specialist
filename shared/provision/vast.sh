@@ -264,14 +264,24 @@ search_offers() {
         return 5
     fi
 
-    # Filter out previously failed hosts
+    # Filter out previously failed hosts (by machine_id OR offer_id)
     if [[ -n "${LINUS_EXCLUDED_HOSTS:-}" ]]; then
         local filtered_json
         filtered_json=$(echo "$search_output" | python3 -c "
 import json, sys
-excluded = set('${LINUS_EXCLUDED_HOSTS}'.split())
+raw = '${LINUS_EXCLUDED_HOSTS}'.split()
+# Split into machine_ids and offer:NNN entries
+offer_excludes = set()
+machine_excludes = set()
+for entry in raw:
+    if entry.startswith('offer:'):
+        offer_excludes.add(entry.split(':',1)[1])
+    elif entry:
+        machine_excludes.add(entry)
 offers = json.load(sys.stdin)
-filtered = [o for o in offers if str(o.get('host_id','')) not in excluded]
+filtered = [o for o in offers
+    if str(o.get('host_id','')) not in machine_excludes
+    and str(o.get('id','')) not in offer_excludes]
 json.dump(filtered, sys.stdout)
 " 2>/dev/null) || true
 
@@ -539,12 +549,17 @@ main() {
 
         local run_exit=$?
 
-        # Extract both host_id and machine_id using robust table parser
+        # Extract machine_id for host exclusion. Vast CLI may crash on broken
+        # instances (TypeError on missing start_date). Fall back through:
+        #   1. Table parser (if CLI succeeds)
+        #   2. SSH probe value (set by wait_for_running when status='running')
+        #   3. Offer ID (always available — exclude the specific offer)
         local bad_host=""
         bad_host=$(vastai show instance "$ALLOCATED_CONTRACT_ID" 2>/dev/null | \
             python3 "$SCRIPT_DIR/../lib/parse-vast-table.py" machine_id 2>/dev/null) || true
-        # Fall back to ALLOCATED_BAD_HOST_ID set by wait_for_running SSH probe
         [[ -z "$bad_host" ]] && bad_host="${ALLOCATED_BAD_HOST_ID:-}"
+        # Final fallback: exclude by offer ID to prevent re-selecting same broken host
+        [[ -z "$bad_host" ]] && bad_host="offer:${ALLOCATED_OFFER_ID}"
 
         # Classify the failure
         case $run_exit in
