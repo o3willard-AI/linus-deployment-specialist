@@ -47,7 +47,7 @@ readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Source shared libraries
 source "$SCRIPT_DIR/../lib/paths.sh" || exit 1
-source_lib "logging.sh" "validation.sh"
+source_lib "logging.sh" "validation.sh" "vast-sizing.sh"
 
 # -----------------------------------------------------------------------------
 # Configuration from environment with defaults
@@ -62,6 +62,9 @@ readonly VAST_MODEL_FILE="${VAST_MODEL_FILE:-}"
 readonly VAST_CTX_SIZE="${VAST_CTX_SIZE:-32768}"
 readonly VAST_API_KEY="${VAST_API_KEY:-linus-inference}"
 readonly VAST_SERVER_PORT="${VAST_SERVER_PORT:-8080}"
+readonly VAST_CACHE_TYPE_K="${VAST_CACHE_TYPE_K:-q8_0}"
+readonly VAST_CACHE_TYPE_V="${VAST_CACHE_TYPE_V:-q8_0}"
+readonly VAST_FLASH_ATTN="${VAST_FLASH_ATTN:-true}"
 
 readonly INSTANCE_WORKSPACE="/workspace"
 readonly LLAMA_DIR="${INSTANCE_WORKSPACE}/llama.cpp"
@@ -125,6 +128,17 @@ validate_environment() {
         return 3
     fi
     log_info "SSH connectivity confirmed"
+
+    # Validate cache types against allowed values
+    if ! vast_validate_cache_type "$VAST_CACHE_TYPE_K" 2>/dev/null; then
+        log_error "Invalid VAST_CACHE_TYPE_K: '${VAST_CACHE_TYPE_K}'. Valid: ${VALID_CACHE_TYPES}"
+        return 3
+    fi
+    if ! vast_validate_cache_type "$VAST_CACHE_TYPE_V" 2>/dev/null; then
+        log_error "Invalid VAST_CACHE_TYPE_V: '${VAST_CACHE_TYPE_V}'. Valid: ${VALID_CACHE_TYPES}"
+        return 3
+    fi
+    log_info "KV cache: K=${VAST_CACHE_TYPE_K} V=${VAST_CACHE_TYPE_V} flash_attn=${VAST_FLASH_ATTN}"
 
     # Verify required tools locally
     check_dependencies curl ssh scp || return 2
@@ -326,7 +340,13 @@ start_server() {
         return 0
     fi
 
-    log_info "Launching llama-server: model=${VAST_MODEL_FILE}, ctx=${VAST_CTX_SIZE}, port=${VAST_SERVER_PORT}"
+    log_info "Launching llama-server: model=${VAST_MODEL_FILE}, ctx=${VAST_CTX_SIZE}, port=${VAST_SERVER_PORT}, cache=K${VAST_CACHE_TYPE_K}/V${VAST_CACHE_TYPE_V}, flash=${VAST_FLASH_ATTN}"
+
+    # Build optional flags
+    local extra_flags=""
+    [[ "$VAST_FLASH_ATTN" == "true" ]] && extra_flags="$extra_flags --flash-attn"
+    [[ "$VAST_CACHE_TYPE_K" != "f16" ]] && extra_flags="$extra_flags --cache-type-k ${VAST_CACHE_TYPE_K}"
+    [[ "$VAST_CACHE_TYPE_V" != "f16" ]] && extra_flags="$extra_flags --cache-type-v ${VAST_CACHE_TYPE_V}"
 
     # Start via nohup (pitfall guard #9)
     local start_cmd="nohup ${LLAMA_SERVER_BIN} \
@@ -336,6 +356,7 @@ start_server() {
         --n-gpu-layers all \
         --ctx-size ${VAST_CTX_SIZE} \
         --api-key ${VAST_API_KEY} \
+        ${extra_flags} \
         > ${LLAMA_SERVER_LOG} 2>&1 &"
 
     if ! eval "$ssh_cmd \"$start_cmd\"" 2>/dev/null; then

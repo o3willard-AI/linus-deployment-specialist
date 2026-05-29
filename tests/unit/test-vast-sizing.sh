@@ -167,6 +167,62 @@ set +e; r=$(vast_calc_dlperf_per_dollar 100 0 2>&1); ec=$?; set -e
 [[ $ec -eq 1 ]] && echo "$r" | grep -qi "zero" && test_ok "Div-by-zero → error" \
     || test_fail "Div-by-zero → error" "exit=$ec output=$r"
 
+# ====== AC7: KV Cache Quantization ======
+echo ""
+echo -e "${BLUE}AC7: KV Cache Quantization${NC}"
+
+[[ ${#KV_CACHE_MULTIPLIERS[@]} -gt 0 ]] && test_ok "KV_CACHE_MULTIPLIERS populated (${#KV_CACHE_MULTIPLIERS[@]} entries)" \
+    || test_fail "KV_CACHE_MULTIPLIERS populated" "array is empty"
+
+[[ "${KV_CACHE_MULTIPLIERS[f16]}" == "1.00" ]] && test_ok "KV_CACHE_MULTIPLIERS[f16] = 1.00" \
+    || test_fail "KV_CACHE_MULTIPLIERS[f16] = 1.00" "got ${KV_CACHE_MULTIPLIERS[f16]}"
+
+[[ "${KV_CACHE_MULTIPLIERS[q8_0]}" == "0.55" ]] && test_ok "KV_CACHE_MULTIPLIERS[q8_0] = 0.55" \
+    || test_fail "KV_CACHE_MULTIPLIERS[q8_0] = 0.55" "got ${KV_CACHE_MULTIPLIERS[q8_0]}"
+
+r=$(vast_calc_kv_cache 32768 7 q8_0)
+# 7B@32K f16 = 1.72, ×0.55 = 0.95
+[[ "$r" == "0.95" ]] && test_ok "7B@32K q8_0 → $r" || test_fail "7B@32K q8_0 → 0.95" "got $r"
+
+r=$(vast_calc_kv_cache 32768 7 q4_0)
+# 7B@32K f16 = 1.72, ×0.30 = 0.52
+[[ "$r" == "0.52" ]] && test_ok "7B@32K q4_0 → $r" || test_fail "7B@32K q4_0 → 0.52" "got $r"
+
+r=$(vast_calc_kv_cache 131072 17 q8_0)
+# 17B@128K f16 = 16.71, ×0.55 = 9.19
+[[ "$r" == "9.19" ]] && test_ok "17B@128K q8_0 → $r" || test_fail "17B@128K q8_0 → 9.19" "got $r"
+
+r=$(vast_calc_kv_cache 32768 7 invalid 2>&1) || ec=$?
+[[ ${ec:-0} -eq 1 ]] && test_ok "Invalid cache type → error" \
+    || test_fail "Invalid cache type → error" "exit=${ec:-0}"
+
+# vast_validate_cache_type
+vast_validate_cache_type f16 2>/dev/null && test_ok "validate f16 → OK" \
+    || test_fail "validate f16 → OK" "should pass"
+
+! vast_validate_cache_type bad 2>/dev/null && test_ok "validate bad → fail" \
+    || test_fail "validate bad → fail" "should fail"
+
+# ====== AC8: VRAM with Quantized Cache ======
+echo ""
+echo -e "${BLUE}AC8: VRAM with Quantized Cache${NC}"
+
+r=$(vast_calc_required_vram 7 Q4_K_M 32768 q8_0 q8_0)
+# model=4.20, kv=max(0.95,0.95)=0.95, overhead=1.50 → 6.65
+[[ "$r" == "6.65" ]] && test_ok "7B Q4_K_M @32K q8_0/q8_0 → $r" || test_fail "7B Q4_K_M @32K q8_0/q8_0 → 6.65" "got $r"
+
+r=$(vast_calc_required_vram 7 Q4_K_M 32768 q4_0 q4_0)
+# model=4.20, kv=max(0.52,0.52)=0.52, overhead=1.50 → 6.22
+[[ "$r" == "6.22" ]] && test_ok "7B Q4_K_M @32K q4_0/q4_0 → $r" || test_fail "7B Q4_K_M @32K q4_0/q4_0 → 6.22" "got $r"
+
+r=$(vast_calc_required_vram 17 Q4_K_M 131072 q8_0 q8_0)
+# model=10.20, kv=max(9.19,9.19)=9.19, overhead=1.50 → 20.89
+[[ "$r" == "20.89" ]] && test_ok "17B Q4_K_M @128K q8_0/q8_0 → $r" || test_fail "17B Q4_K_M @128K q8_0/q8_0 → 20.89" "got $r"
+
+# Default (no cache args) = f16/f16 — should match original AC4 values
+r=$(vast_calc_required_vram 7 Q4_K_M 32768)
+[[ "$r" == "7.42" ]] && test_ok "7B Q4_K_M @32K (default f16) → $r" || test_fail "7B Q4_K_M @32K (default f16) → 7.42" "got $r"
+
 # ====== Summary ======
 echo ""
 echo "=========================================="

@@ -52,6 +52,9 @@ readonly VAST_SORT_STRATEGY="${VAST_SORT_STRATEGY:-value}"
 readonly VAST_CUDA_ARCH="${VAST_CUDA_ARCH:-86}"
 readonly VAST_MODEL_QUANT="${VAST_MODEL_QUANT:-Q4_K_M}"
 readonly VAST_CTX_SIZE="${VAST_CTX_SIZE:-32768}"
+readonly VAST_CACHE_TYPE_K="${VAST_CACHE_TYPE_K:-q8_0}"
+readonly VAST_CACHE_TYPE_V="${VAST_CACHE_TYPE_V:-q8_0}"
+readonly VAST_FLASH_ATTN="${VAST_FLASH_ATTN:-true}"
 readonly VAST_IMAGE="${VAST_IMAGE:-nvidia/cuda:12.4.0-devel-ubuntu22.04}"
 readonly VAST_API_KEY_NAME="${VAST_API_KEY_NAME:-linus-inference}"
 
@@ -185,9 +188,9 @@ validate_environment() {
     if [[ -n "${VAST_MODEL_REPO:-}" && -n "${VAST_MODEL_QUANT:-}" ]]; then
         local model_params_b="${VAST_MODEL_PARAMS_B:-7}"
         local required_vram
-        required_vram=$(vast_calc_required_vram "$model_params_b" "$VAST_MODEL_QUANT" "$VAST_CTX_SIZE") || true
+        required_vram=$(vast_calc_required_vram "$model_params_b" "$VAST_MODEL_QUANT" "$VAST_CTX_SIZE" "$VAST_CACHE_TYPE_K" "$VAST_CACHE_TYPE_V") || true
         if [[ -n "$required_vram" ]]; then
-            log_info "Model VRAM requirement: ${required_vram}GB (${VAST_MODEL_QUANT} @ ${VAST_CTX_SIZE} ctx)"
+            log_info "Model VRAM requirement: ${required_vram}GB (${VAST_MODEL_QUANT} @ ${VAST_CTX_SIZE} ctx, KV=${VAST_CACHE_TYPE_K}/${VAST_CACHE_TYPE_V})"
         fi
     fi
 
