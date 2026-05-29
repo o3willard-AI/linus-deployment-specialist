@@ -47,7 +47,10 @@ readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Source shared libraries
 source "$SCRIPT_DIR/../lib/paths.sh" || exit 1
-source_lib "logging.sh" "validation.sh" "vast-sizing.sh" "retry.sh"
+source_lib "logging.sh" "validation.sh" "retry.sh"
+# vast-sizing.sh must be sourced directly — its declare -A arrays
+# don't survive source_lib's subshell-based directory walk
+source "$SCRIPT_DIR/../lib/vast-sizing.sh"
 
 # -----------------------------------------------------------------------------
 # Configuration from environment with defaults
@@ -269,7 +272,7 @@ start_server() {
 
     # Build optional flags
     local extra_flags=""
-    [[ "$VAST_FLASH_ATTN" == "true" ]] && extra_flags="$extra_flags --flash-attn"
+    [[ "$VAST_FLASH_ATTN" == "true" ]] && extra_flags="$extra_flags --flash-attn on"
     [[ "$VAST_CACHE_TYPE_K" != "f16" ]] && extra_flags="$extra_flags --cache-type-k ${VAST_CACHE_TYPE_K}"
     [[ "$VAST_CACHE_TYPE_V" != "f16" ]] && extra_flags="$extra_flags --cache-type-v ${VAST_CACHE_TYPE_V}"
 
