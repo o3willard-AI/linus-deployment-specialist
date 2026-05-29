@@ -350,10 +350,9 @@ wait_for_running() {
     while [[ $elapsed -lt $max_wait ]]; do
         local status
         # vastai show instance outputs table format, not JSON.
-        # First table section: row# ID Machine Status Num Model ...
-        # Status is column 4. Match row by contract ID to be precise.
+        # Leading whitespace shifts fields: $3=contract ID, $5=status
         status=$(vastai show instance "$contract_id" 2>/dev/null | \
-            awk -v cid="$contract_id" '$2 == cid {print $4}' 2>/dev/null) || status="unknown"
+            awk -v cid="$contract_id" '$3 == cid {print $5}' 2>/dev/null) || status="unknown"
         # Handle empty/whitespace status during loading (awk prints nothing but exits 0)
         [[ -z "${status// }" ]] && status="loading"
 
