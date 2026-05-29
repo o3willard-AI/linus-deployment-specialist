@@ -47,7 +47,7 @@ readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Source shared libraries
 source "$SCRIPT_DIR/../lib/paths.sh" || exit 1
-source_lib "logging.sh" "validation.sh" "vast-sizing.sh"
+source_lib "logging.sh" "validation.sh" "vast-sizing.sh" "retry.sh"
 
 # -----------------------------------------------------------------------------
 # Configuration from environment with defaults
@@ -239,93 +239,18 @@ download_model() {
         log_info "Disk space OK: ${disk_free}GB free, need ~${needed_gb}GB"
     fi
 
-    # --- Build download script ---
-    local dl_script="/tmp/linus-vast-dl-${CONTRACT_ID}.sh"
-    cat > "$dl_script" << DLSCRIPT
-#!/bin/bash
-set -euo pipefail
-
-MODEL_URL="${MODEL_URL}"
-MODEL_PATH="${MODEL_PATH}"
-MODEL_DIR="${MODEL_DIR}"
-
-mkdir -p "\$MODEL_DIR"
-cd "\$MODEL_DIR"
-
-echo "[download] Starting download of ${VAST_MODEL_FILE}..."
-echo "[download] URL: \$MODEL_URL"
-
-# Download with resume support, explicit filename
-TEMP_FILE="\${MODEL_DIR}/.\${VAST_MODEL_FILE}.dl"
-curl -L -C - -o "\$TEMP_FILE" "\$MODEL_URL" --progress-bar
-
-# Pitfall #13 guard: XetHub may save under content hash
-# If the file doesn't match our expected name pattern, rename it
-ACTUAL_SIZE=\$(stat -c%s "\$TEMP_FILE" 2>/dev/null || echo 0)
-if [[ \$ACTUAL_SIZE -lt 1048576 ]]; then
-    echo "[download] ERROR: Downloaded file too small (\${ACTUAL_SIZE} bytes)"
-    exit 1
-fi
-
-mv "\$TEMP_FILE" "\$MODEL_PATH"
-echo "[download] Complete: \$(stat -c%s "\$MODEL_PATH") bytes"
-echo "DOWNLOAD_DONE"
-DLSCRIPT
-
-    chmod +x "$dl_script"
-
-    # --- scp the script to the instance ---
-    log_info "Copying download script to instance..."
-    local scp_cmd
-    scp_cmd="scp $(_ssh_args) -P ${SSH_PORT} \"${dl_script}\" root@${SSH_HOST}:/tmp/linus-vast-dl.sh"
-    if ! eval "$scp_cmd" 2>/dev/null; then
-        log_error "Failed to scp download script"
-        rm -f "$dl_script"
+    # --- Download with multi-strategy retry ---
+    # retry_model_download handles: curl with resume, wget fallback,
+    # size verification, 5 attempts with exponential backoff
+    log_info "Starting model download (multi-strategy, up to 5 attempts)..."
+    if ! retry_model_download "$SSH_HOST" "$SSH_PORT" "none" "$MODEL_URL" "$MODEL_PATH" 5; then
+        log_error "Model download failed after 5 attempts"
         return 5
     fi
-    rm -f "$dl_script"
 
-    # --- Run download via nohup (pitfall guard #9) ---
-    log_info "Starting model download (this may take 10-60 minutes)..."
-    eval "$ssh_cmd \"nohup bash /tmp/linus-vast-dl.sh > /var/log/linus-dl.log 2>&1 &\"" 2>/dev/null || {
-        log_error "Failed to start download script"
-        return 5
-    }
-
-    # --- Poll for completion ---
-    local max_wait=3600  # 60 minutes for large models
-    local elapsed=0
-    while [[ $elapsed -lt $max_wait ]]; do
-        local dl_status
-        dl_status=$(eval "$ssh_cmd \"cat /var/log/linus-dl.log 2>/dev/null\"" 2>/dev/null) || true
-
-        if echo "$dl_status" | grep -q "DOWNLOAD_DONE"; then
-            log_success "Model downloaded (${elapsed}s)"
-            return 0
-        fi
-
-        if echo "$dl_status" | grep -qi "ERROR"; then
-            log_error "Download failed:\n${dl_status}"
-            return 5
-        fi
-
-        # Show progress every 60s
-        if [[ $((elapsed % 60)) -eq 0 ]]; then
-            local last_line
-            last_line=$(echo "$dl_status" | tail -1)
-            log_info "Downloading... (${elapsed}s) ${last_line}"
-        fi
-
-        sleep 10
-        ((elapsed+=10))
-    done
-
-    log_error "Model download timed out after ${max_wait}s"
-    return 5
+    log_success "Model downloaded"
+    return 0
 }
-
-# -----------------------------------------------------------------------------
-# Function: start_server
 # -----------------------------------------------------------------------------
 
 start_server() {
@@ -375,38 +300,27 @@ start_server() {
 wait_for_server() {
     log_step "5" "Waiting for llama-server to become healthy"
 
-    local max_wait=120
-    local elapsed=0
+    # Check server log for crash indicators before polling health
+    local ssh_cmd
+    ssh_cmd="ssh $(_ssh_args) -p ${SSH_PORT} root@${SSH_HOST}"
+    sleep 5  # Give server a moment to start (or crash)
 
-    while [[ $elapsed -lt $max_wait ]]; do
-        local health_resp
-        health_resp=$(curl -s -o /dev/null -w "%{http_code}" "$HEALTH_URL" 2>/dev/null) || health_resp="000"
+    local server_log
+    server_log=$(eval "$ssh_cmd \"tail -10 ${LLAMA_SERVER_LOG} 2>/dev/null\"" 2>/dev/null) || true
+    if echo "$server_log" | grep -qi "error\|failed\|segfault\|cannot\|OOM\|out of memory"; then
+        log_error "Server crashed on startup. Log:\n${server_log}"
+        return 6
+    fi
 
-        if [[ "$health_resp" == "200" ]]; then
-            log_success "Server healthy at ${HEALTH_URL} (${elapsed}s)"
-            return 0
-        fi
+    # Multi-attempt health check: 24 attempts × 5s = 2 min
+    if retry_health_check "$HEALTH_URL" 24 5; then
+        log_success "Server healthy at ${HEALTH_URL}"
+        return 0
+    fi
 
-        # Check server log for errors
-        if [[ $elapsed -gt 30 ]]; then
-            local ssh_cmd
-            ssh_cmd="ssh $(_ssh_args) -p ${SSH_PORT} root@${SSH_HOST}"
-            local server_log
-            server_log=$(eval "$ssh_cmd \"tail -5 ${LLAMA_SERVER_LOG} 2>/dev/null\"" 2>/dev/null) || true
-            if echo "$server_log" | grep -qi "error\|failed\|segfault\|cannot"; then
-                log_error "Server failed to start. Log:\n${server_log}"
-                return 6
-            fi
-        fi
-
-        sleep 5
-        ((elapsed+=5))
-        if [[ $((elapsed % 30)) -eq 0 ]]; then
-            log_info "Waiting for server... (${elapsed}s, HTTP ${health_resp})"
-        fi
-    done
-
-    log_error "Server did not become healthy within ${max_wait}s"
+    # If still not healthy, check logs one final time
+    server_log=$(eval "$ssh_cmd \"tail -20 ${LLAMA_SERVER_LOG} 2>/dev/null\"" 2>/dev/null) || true
+    log_error "Server did not become healthy. Log:\n${server_log}"
     return 7
 }
 
@@ -420,24 +334,47 @@ verify_inference() {
     log_step "6" "Verifying inference"
 
     local prompt="Hello, this is a Linus deployment test. Please respond with OK."
-    local resp
-    resp=$(curl -s "$CHAT_URL" \
-        -H "Authorization: Bearer ${VAST_API_KEY}" \
-        -H "Content-Type: application/json" \
-        -d "{
-            \"model\": \"${VAST_MODEL_FILE}\",
-            \"messages\": [{\"role\": \"user\", \"content\": \"${prompt}\"}],
-            \"max_tokens\": 20
-        }" 2>/dev/null) || true
 
-    if echo "$resp" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['choices'][0]['message']['content'])" >/dev/null 2>&1; then
-        local content
-        content=$(echo "$resp" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['choices'][0]['message']['content'][:100])" 2>/dev/null) || content="(parse error)"
-        log_success "Inference verified. Response: ${content}"
-        return 0
-    fi
+    # Retry up to 3 times — model may still be loading (HTTP 503)
+    # with 15s backoff between attempts
+    local attempt=0
+    while [[ $attempt -lt 3 ]]; do
+        ((attempt++))
 
-    log_error "Inference test failed. Response: ${resp}"
+        if [[ $attempt -gt 1 ]]; then
+            local wait_time=$((15 * attempt))
+            log_warn "[inference] Attempt ${attempt}/3 — waiting ${wait_time}s for model to warm up..."
+            sleep "$wait_time"
+        fi
+
+        local resp
+        resp=$(curl -s --max-time 30 "$CHAT_URL" \
+            -H "Authorization: Bearer ${VAST_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{
+                \"model\": \"${VAST_MODEL_FILE}\",
+                \"messages\": [{\"role\": \"user\", \"content\": \"${prompt}\"}],
+                \"max_tokens\": 20
+            }" 2>/dev/null) || true
+
+        # Check if we got a valid completion
+        if echo "$resp" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['choices'][0]['message']['content'])" >/dev/null 2>&1; then
+            local content
+            content=$(echo "$resp" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['choices'][0]['message']['content'][:100])" 2>/dev/null) || content="(parse error)"
+            log_success "Inference verified (attempt ${attempt}). Response: ${content}"
+            return 0
+        fi
+
+        # Check for transient errors (503 = model loading, 429 = rate limit)
+        if echo "$resp" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('error',{}).get('code',''))" 2>/dev/null | grep -q "503\|429"; then
+            log_warn "[inference] Model still loading or rate limited — retrying"
+            continue
+        fi
+
+        log_warn "[inference] Attempt ${attempt} failed. Response: ${resp}"
+    done
+
+    log_error "Inference verification failed after 3 attempts"
     return 6
 }
 

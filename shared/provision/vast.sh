@@ -39,7 +39,7 @@ readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Source shared libraries
 source "$SCRIPT_DIR/../lib/paths.sh" || exit 1
-source_lib "logging.sh" "validation.sh" "vast-sizing.sh"
+source_lib "logging.sh" "validation.sh" "vast-sizing.sh" "retry.sh"
 
 # -----------------------------------------------------------------------------
 # Configuration from environment with defaults
@@ -369,9 +369,8 @@ wait_for_ssh() {
     log_step "5" "Waiting for SSH access"
 
     local contract_id="$ALLOCATED_CONTRACT_ID"
-    local max_wait=120
-    local elapsed=0
 
+    # Fetch SSH details from Vast API
     local instance_json
     instance_json=$(vastai show instance "$contract_id" 2>/dev/null) || true
 
@@ -390,7 +389,8 @@ wait_for_ssh() {
 
     log_info "SSH: ${ssh_host}:${ssh_port} (proxy: ${ALLOCATED_PROXY_PORT})"
 
-    local ssh_key=""
+    # Auto-discover SSH key
+    local ssh_key="none"
     for candidate in ~/.ssh/vast-ai-inference ~/.ssh/id_ed25519 ~/.ssh/id_rsa; do
         if [[ -f "$candidate" ]]; then
             ssh_key="$candidate"
@@ -398,22 +398,13 @@ wait_for_ssh() {
         fi
     done
 
-    local ssh_args=(-o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
-    [[ -n "$ssh_key" ]] && ssh_args+=(-i "$ssh_key")
+    # Multi-strategy SSH retry: 4 strategies × 3 attempts with backoff
+    if retry_ssh_with_backoff 3 "$ssh_host" "$ssh_port" "$ssh_key" "echo ok"; then
+        log_success "SSH ready at ${ssh_host}:${ssh_port}}"
+        return 0
+    fi
 
-    while [[ $elapsed -lt $max_wait ]]; do
-        if ssh "${ssh_args[@]}" -p "$ssh_port" "root@${ssh_host}" "echo ok" >/dev/null 2>&1; then
-            log_success "SSH ready at ${ssh_host}:${ssh_port} (${elapsed}s)"
-            return 0
-        fi
-        sleep 5
-        ((elapsed+=5))
-        if [[ $((elapsed % 30)) -eq 0 ]]; then
-            log_info "Waiting for SSH... (${elapsed}s/${max_wait}s)"
-        fi
-    done
-
-    log_error "SSH not accessible after ${max_wait}s"
+    log_error "SSH not accessible after multi-strategy retry"
     return 6
 }
 
@@ -456,7 +447,10 @@ main() {
     trap cleanup_on_error EXIT
 
     validate_environment || exit $?
-    search_offers || exit $?
+
+    # search_offers: retry on transient API failures (3 attempts, 10s backoff)
+    retry_with_backoff "offer_search" 3 10 search_offers || exit $?
+
     create_instance || exit $?
     wait_for_running || exit $?
     wait_for_ssh || exit $?
