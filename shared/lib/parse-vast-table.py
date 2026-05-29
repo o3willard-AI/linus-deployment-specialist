@@ -9,6 +9,7 @@ whitespace that shifts column positions. This parser handles:
 - Multi-section tables separated by blank lines
 - Variable column widths
 - Missing/empty fields
+- ANSI escape codes (Vast CLI outputs terminal color codes)
 
 Usage: vastai show instance CONTRACT_ID | python3 parse-vast-table.py FIELD [FIELD...]
   Fields: status, machine_id, host_id, ssh_host, ssh_port, price, image
@@ -20,6 +21,10 @@ import re
 
 def parse_table(lines):
     """Parse Vast's multi-section table into a dict of parsed rows."""
+    # Strip ANSI escape codes that Vast CLI outputs in terminal mode
+    ansi_re = re.compile(r'\x1b\[[0-9;]*m')
+    lines = [ansi_re.sub('', line) for line in lines]
+    
     sections = []
     current_section = []
     
