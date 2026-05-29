@@ -55,6 +55,7 @@ readonly VAST_CTX_SIZE="${VAST_CTX_SIZE:-32768}"
 readonly VAST_CACHE_TYPE_K="${VAST_CACHE_TYPE_K:-q8_0}"
 readonly VAST_CACHE_TYPE_V="${VAST_CACHE_TYPE_V:-q8_0}"
 readonly VAST_FLASH_ATTN="${VAST_FLASH_ATTN:-true}"
+readonly VAST_MIN_DISK="${VAST_MIN_DISK:-}"
 readonly VAST_IMAGE="${VAST_IMAGE:-nvidia/cuda:12.4.0-devel-ubuntu22.04}"
 readonly VAST_API_KEY_NAME="${VAST_API_KEY_NAME:-linus-inference}"
 
@@ -64,6 +65,7 @@ ALLOCATED_CONTRACT_ID=""
 ALLOCATED_SSH_HOST=""
 ALLOCATED_SSH_PORT=""
 ALLOCATED_PROXY_PORT=""
+CALCULATED_DISK_GB=""
 
 # -----------------------------------------------------------------------------
 # Credential auto-discovery (matches proxmox.sh pattern)
@@ -194,6 +196,27 @@ validate_environment() {
         fi
     fi
 
+    # ---- Check 7: Disk sizing ----
+    # Priority: 1) explicit VAST_MIN_DISK, 2) calculate from model, 3) fallback 80GB
+    if [[ -n "$VAST_MIN_DISK" ]]; then
+        CALCULATED_DISK_GB="$VAST_MIN_DISK"
+        log_info "Disk: ${CALCULATED_DISK_GB}GB (explicit VAST_MIN_DISK)"
+    elif [[ -n "${VAST_MODEL_REPO:-}" && -n "${VAST_MODEL_QUANT:-}" ]]; then
+        local model_params_b="${VAST_MODEL_PARAMS_B:-7}"
+        local model_size_gb
+        model_size_gb=$(vast_calc_model_size "$model_params_b" "$VAST_MODEL_QUANT") || true
+        if [[ -n "$model_size_gb" ]]; then
+            CALCULATED_DISK_GB=$(vast_calc_required_disk "$model_size_gb") || CALCULATED_DISK_GB=80
+            log_info "Disk: ${CALCULATED_DISK_GB}GB (model=${model_size_gb}GB × 2.5)"
+        else
+            CALCULATED_DISK_GB=80
+            log_info "Disk: ${CALCULATED_DISK_GB}GB (fallback, model size unknown)"
+        fi
+    else
+        CALCULATED_DISK_GB=80
+        log_info "Disk: ${CALCULATED_DISK_GB}GB (fallback, no model specified)"
+    fi
+
     log_success "Environment validation passed"
     return 0
 }
@@ -207,8 +230,9 @@ search_offers() {
 
     local gpu_filter="gpu_name=${VAST_GPU_NAME} num_gpus=${VAST_NUM_GPUS} verified=true rentable=true direct_port_count>=1"
     local reliability_filter="reliability>=${VAST_MIN_RELIABILITY}"
+    local disk_filter="disk>=${CALCULATED_DISK_GB}"
 
-    log_info "Filters: ${gpu_filter} ${reliability_filter}"
+    log_info "Filters: ${gpu_filter} ${reliability_filter} ${disk_filter}"
 
     local sort_flag
     case "$VAST_SORT_STRATEGY" in
@@ -218,7 +242,7 @@ search_offers() {
     esac
 
     local search_output
-    search_output=$(vastai search offers "${gpu_filter} ${reliability_filter}" -o "$sort_flag" --limit 10 --raw 2>/dev/null) || {
+    search_output=$(vastai search offers "${gpu_filter} ${reliability_filter} ${disk_filter}" -o "$sort_flag" --limit 10 --raw 2>/dev/null) || {
         log_error "Offer search failed. Check VAST_API_KEY and network."
         return 4
     }
@@ -262,7 +286,7 @@ create_instance() {
     fi
 
     log_info "Creating instance from offer ${offer_id}..."
-    local disk_gb="${VAST_MIN_DISK:-80}"
+    local disk_gb="${CALCULATED_DISK_GB:-80}"
 
     local create_output
     create_output=$(vastai create instance "$offer_id" \
