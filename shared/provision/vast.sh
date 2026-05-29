@@ -39,7 +39,10 @@ readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Source shared libraries
 source "$SCRIPT_DIR/../lib/paths.sh" || exit 1
-source_lib "logging.sh" "validation.sh" "vast-sizing.sh" "retry.sh"
+source_lib "logging.sh" "validation.sh" "retry.sh"
+# vast-sizing.sh must be sourced directly — its declare -A arrays
+# don't survive source_lib's subshell-based directory walk
+source "$SCRIPT_DIR/../lib/vast-sizing.sh"
 
 # -----------------------------------------------------------------------------
 # Configuration from environment with defaults
@@ -149,28 +152,31 @@ validate_environment() {
 
     # ---- Check 4: SSH key registered AND valid (pitfall guard #1) ----
     log_info "Checking SSH keys..."
-    local ssh_keys_output
-    ssh_keys_output=$(vastai show ssh-keys 2>/dev/null) || true
-
-    if [[ -z "$ssh_keys_output" ]]; then
-        log_error "No SSH keys registered on Vast.ai. Register one with: vastai create ssh-key \"\$(cat ~/.ssh/id_ed25519.pub)\""
-        return 3
-    fi
-
-    # Pitfall guard: keys stored as file paths instead of content
-    local valid_key_found=false
-    while IFS= read -r line; do
-        if [[ "$line" =~ ^(ssh-ed25519|ssh-rsa)[[:space:]] ]]; then
-            valid_key_found=true
+    # Use temp script to avoid pipefail issues with inline Python
+    cat > /tmp/linus-check-ssh.py << 'PYEOF'
+import ast, sys
+data = sys.stdin.read()
+# Parse Vast CLI's Python list-of-dicts output
+# Look for any key starting with ssh-ed25519 or ssh-rsa
+# (not a file path like /home/user/.ssh/key.pub — pitfall #1)
+found = False
+try:
+    keys = ast.literal_eval(data)
+    for k in keys:
+        pk = k.get('public_key','').strip()
+        if pk.startswith('ssh-ed25519') or pk.startswith('ssh-rsa'):
+            found = True
             break
-        fi
-    done <<< "$ssh_keys_output"
-
-    if ! $valid_key_found; then
-        log_error "SSH key stored as file PATH, not key content."
-        log_error "Fix: vastai delete ssh-key <id> && vastai create ssh-key \"\$(cat ~/.ssh/key.pub)\""
+except Exception:
+    pass
+# Exit 0 if at least one valid key found
+sys.exit(0 if found else 1)
+PYEOF
+    if ! (vastai show ssh-keys 2>/dev/null || true) | python3 /tmp/linus-check-ssh.py; then
+        log_error "No valid SSH key found. Register one with: vastai create ssh-key \"\$(cat ~/.ssh/id_ed25519.pub)\""
         return 3
     fi
+    rm -f /tmp/linus-check-ssh.py
     log_info "SSH keys OK"
 
     # ---- Check 5: GPU name valid ----
@@ -230,7 +236,7 @@ search_offers() {
 
     local gpu_filter="gpu_name=${VAST_GPU_NAME} num_gpus=${VAST_NUM_GPUS} verified=true rentable=true direct_port_count>=1"
     local reliability_filter="reliability>=${VAST_MIN_RELIABILITY}"
-    local disk_filter="disk>=${CALCULATED_DISK_GB}"
+    local disk_filter="disk_space>=${CALCULATED_DISK_GB}"
 
     if [[ -n "${LINUS_EXCLUDED_HOSTS:-}" ]]; then
         log_info "Excluding hosts: ${LINUS_EXCLUDED_HOSTS}"
@@ -295,17 +301,11 @@ create_instance() {
     log_step "3" "Creating Vast instance"
 
     local offer_id="$ALLOCATED_OFFER_ID"
-    local onstart_template="$SCRIPT_DIR/../templates/onstart-vast.sh"
-
+    # Vast --onstart-cmd runs a single shell command during provisioning.
+    # Use a proven inline build recipe. The onstart-vast.sh template is
+    # the reference doc — keep in sync if changing this command.
     local onstart_cmd
-    if [[ -f "$onstart_template" ]]; then
-        onstart_cmd=$(CUDA_ARCH="$VAST_CUDA_ARCH" bash "$onstart_template" 2>/dev/null | tr '\n' ';') || true
-    fi
-
-    if [[ -z "$onstart_cmd" ]]; then
-        log_warn "Onstart template not found, using inline build command"
-        onstart_cmd="apt-get update -qq && apt-get install -y -qq cmake && mkdir -p /workspace && cd /workspace && git clone --depth 1 https://github.com/ggml-org/llama.cpp && cd llama.cpp && cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=${VAST_CUDA_ARCH} && cmake --build build --config Release -j\$(nproc) && echo BUILD_DONE"
-    fi
+    onstart_cmd="apt-get update -qq && apt-get install -y -qq cmake && mkdir -p /workspace && cd /workspace && git clone --depth 1 https://github.com/ggml-org/llama.cpp && cd llama.cpp && cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=${VAST_CUDA_ARCH} && cmake --build build --config Release -j\$(nproc) && echo BUILD_DONE"
 
     log_info "Creating instance from offer ${offer_id}..."
     local disk_gb="${CALCULATED_DISK_GB:-80}"
@@ -349,11 +349,11 @@ wait_for_running() {
 
     while [[ $elapsed -lt $max_wait ]]; do
         local status
-        status=$(vastai show instance "$contract_id" 2>/dev/null | python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-print(d.get('status', 'unknown'))
-" 2>/dev/null) || status="unknown"
+        # vastai show instance outputs table format, not JSON.
+        # First table section: row# ID Machine Status Num Model ...
+        # Status is column 4. Match row by contract ID to be precise.
+        status=$(vastai show instance "$contract_id" 2>/dev/null | \
+            awk -v cid="$contract_id" '$2 == cid {print $4}' 2>/dev/null) || status="unknown"
 
         case "$status" in
             running)
@@ -373,7 +373,7 @@ print(d.get('status', 'unknown'))
         esac
 
         sleep 10
-        ((elapsed+=10))
+        elapsed=$((elapsed + 10))
         if [[ $((elapsed % 60)) -eq 0 ]]; then
             log_info "Waiting... (${elapsed}s/${max_wait}s, status=$status)"
         fi
@@ -473,7 +473,7 @@ main() {
     LINUS_EXCLUDED_HOSTS="${LINUS_EXCLUDED_HOSTS:-}"
 
     while [[ $host_attempt -lt $max_hosts ]]; do
-        ((host_attempt++))
+        host_attempt=$((host_attempt + 1))
 
         if [[ $host_attempt -gt 1 ]]; then
             log_warn "=== Host attempt ${host_attempt}/${max_hosts} — previous host failed, trying different host ==="
