@@ -232,6 +232,9 @@ search_offers() {
     local reliability_filter="reliability>=${VAST_MIN_RELIABILITY}"
     local disk_filter="disk>=${CALCULATED_DISK_GB}"
 
+    if [[ -n "${LINUS_EXCLUDED_HOSTS:-}" ]]; then
+        log_info "Excluding hosts: ${LINUS_EXCLUDED_HOSTS}"
+    fi
     log_info "Filters: ${gpu_filter} ${reliability_filter} ${disk_filter}"
 
     local sort_flag
@@ -248,8 +251,27 @@ search_offers() {
     }
 
     if [[ -z "$search_output" || "$search_output" == "[]" ]]; then
-        log_error "No offers match: GPU=${VAST_GPU_NAME} reliability>=${VAST_MIN_RELIABILITY}"
+        log_error "No offers match: GPU=${VAST_GPU_NAME} reliability>=${VAST_MIN_RELIABILITY} disk>=${CALCULATED_DISK_GB}"
         return 5
+    fi
+
+    # Filter out previously failed hosts
+    if [[ -n "${LINUS_EXCLUDED_HOSTS:-}" ]]; then
+        local filtered_json
+        filtered_json=$(echo "$search_output" | python3 -c "
+import json, sys
+excluded = set('${LINUS_EXCLUDED_HOSTS}'.split())
+offers = json.load(sys.stdin)
+filtered = [o for o in offers if str(o.get('host_id','')) not in excluded]
+json.dump(filtered, sys.stdout)
+" 2>/dev/null) || true
+
+        if [[ -z "$filtered_json" || "$filtered_json" == "[]" ]]; then
+            log_error "All offers excluded by host blocklist (${LINUS_EXCLUDED_HOSTS})"
+            return 5
+        fi
+        search_output="$filtered_json"
+        log_info "After host exclusion: $(echo "$filtered_json" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null) offers remain"
     fi
 
     local offer_id
@@ -444,15 +466,87 @@ cleanup_on_error() {
 main() {
     log_header "Linus Vast GPU Provisioning"
 
-    trap cleanup_on_error EXIT
-
     validate_environment || exit $?
 
-    # search_offers: retry on transient API failures (3 attempts, 10s backoff)
-    retry_with_backoff "offer_search" 3 10 search_offers || exit $?
+    local max_hosts=3
+    local host_attempt=0
+    LINUS_EXCLUDED_HOSTS="${LINUS_EXCLUDED_HOSTS:-}"
 
-    create_instance || exit $?
-    wait_for_running || exit $?
+    while [[ $host_attempt -lt $max_hosts ]]; do
+        ((host_attempt++))
+
+        if [[ $host_attempt -gt 1 ]]; then
+            log_warn "=== Host attempt ${host_attempt}/${max_hosts} — previous host failed, trying different host ==="
+        fi
+
+        # Search for offers (excluding previously failed hosts)
+        retry_with_backoff "offer_search" 3 10 search_offers || {
+            log_error "No viable offers (attempt ${host_attempt}/${max_hosts})"
+            continue
+        }
+
+        # Create the instance
+        create_instance || {
+            log_error "Instance creation failed (attempt ${host_attempt})"
+            exit $?
+        }
+
+        # Set trap AFTER instance exists (so destroy-on-error works)
+        trap cleanup_on_error EXIT
+
+        # Wait for instance to be running
+        if wait_for_running; then
+            # Success! Break out of host loop
+            log_success "Instance running on attempt ${host_attempt}"
+            break
+        fi
+
+        local run_exit=$?
+
+        # Extract host info before destroying
+        local bad_host=""
+        bad_host=$(vastai show instance "$ALLOCATED_CONTRACT_ID" 2>/dev/null | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print(d.get('host_id',''))
+" 2>/dev/null) || true
+
+        # Classify the failure
+        case $run_exit in
+            5)  # CDI passthrough failure — host is bad
+                log_warn "CDI/GPU passthrough failure on host ${bad_host} — excluding from future searches"
+                ;;
+            6)  # Timeout — might be host or might be transient
+                log_warn "Instance timed out on host ${bad_host} — excluding for safety"
+                ;;
+            *)  # Unknown failure
+                log_warn "Instance failed with exit ${run_exit} on host ${bad_host}"
+                ;;
+        esac
+
+        # Add to exclusion list
+        if [[ -n "$bad_host" ]]; then
+            LINUS_EXCLUDED_HOSTS="$LINUS_EXCLUDED_HOSTS $bad_host"
+        fi
+
+        # Destroy the bad instance and clear state
+        log_warn "Destroying bad instance ${ALLOCATED_CONTRACT_ID}..."
+        vastai destroy instance "$ALLOCATED_CONTRACT_ID" --yes 2>/dev/null || true
+        ALLOCATED_CONTRACT_ID=""
+        ALLOCATED_OFFER_ID=""
+
+        # Clear trap before next loop iteration
+        trap - EXIT
+    done
+
+    # Did we get a working instance?
+    if [[ -z "${ALLOCATED_CONTRACT_ID:-}" ]]; then
+        log_error "Failed to provision a working instance after ${max_hosts} host attempts"
+        log_error "Excluded hosts: ${LINUS_EXCLUDED_HOSTS}"
+        exit 5
+    fi
+
+    # Instance is running — proceed with SSH and output
     wait_for_ssh || exit $?
     output_result
 
