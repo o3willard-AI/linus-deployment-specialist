@@ -177,18 +177,45 @@ verify_build() {
     if eval "$ssh_cmd \"test -x ${LLAMA_SERVER_BIN} && echo FOUND\"" 2>/dev/null | grep -q "FOUND"; then
         log_success "llama-server binary found"
     else
-        # Check if build was attempted
-        local build_log
-        build_log=$(eval "$ssh_cmd \"cat /var/log/onstart.log 2>/dev/null || echo NO_LOG\"" 2>/dev/null) || true
+        # Build may still be in progress (Vast onstart can take 5-10 min)
+        # Wait for it rather than failing immediately
+        log_info "llama-server not found yet — build may still be in progress. Waiting..."
 
-        if echo "$build_log" | grep -q "BUILD_DONE"; then
-            log_error "BUILD_DONE marker found but binary missing at ${LLAMA_SERVER_BIN}"
-        elif echo "$build_log" | grep -q "NO_LOG"; then
-            log_error "No onstart log found — provisioning likely incomplete or build never started"
-        else
-            log_error "Build failed. onstart log:\n${build_log}"
+        local waited=0
+        local max_build_wait=600  # 10 minutes
+        local poll_interval=15
+
+        while [[ $waited -lt $max_build_wait ]]; do
+            sleep "$poll_interval"
+            waited=$((waited + poll_interval))
+
+            if eval "$ssh_cmd \"test -x ${LLAMA_SERVER_BIN} && echo FOUND\"" 2>/dev/null | grep -q "FOUND"; then
+                log_success "llama-server binary found (waited ${waited}s)"
+                break
+            fi
+
+            # Check if build is still running
+            local build_active
+            build_active=$(eval "$ssh_cmd \"pgrep -f 'cmake|make|cc1plus|nvcc' >/dev/null 2>&1 && echo BUILDING || echo IDLE\"" 2>/dev/null) || true
+
+            log_info "Waiting... (${waited}s/${max_build_wait}s, build=${build_active:-UNKNOWN})"
+        done
+
+        # Re-check after wait loop
+        if ! eval "$ssh_cmd \"test -x ${LLAMA_SERVER_BIN} && echo FOUND\"" 2>/dev/null | grep -q "FOUND"; then
+            # Check build log for diagnostics
+            local build_log
+            build_log=$(eval "$ssh_cmd \"cat /var/log/onstart.log 2>/dev/null || echo NO_LOG\"" 2>/dev/null) || true
+
+            if echo "$build_log" | grep -q "BUILD_DONE"; then
+                log_error "BUILD_DONE marker found but binary missing at ${LLAMA_SERVER_BIN}"
+            elif echo "$build_log" | grep -q "NO_LOG"; then
+                log_error "No onstart log found — provisioning likely incomplete or build never started"
+            else
+                log_error "Build timed out after ${max_build_wait}s. Last log:\n$(echo "$build_log" | tail -20)"
+            fi
+            return 4
         fi
-        return 4
     fi
 
     # Ensure models directory exists
