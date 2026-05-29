@@ -103,7 +103,7 @@ function validate_inputs() {
     
     # Validate provider
     case "${PROVIDER}" in
-        proxmox|aws|qemu)
+        proxmox|aws|qemu|vast)
             log_info "Provider ${PROVIDER} is supported"
             ;;
         *)
@@ -142,6 +142,32 @@ function confirm_destruction() {
     fi
     
     return 0
+}
+
+function destroy_vast_instance() {
+    local contract_id="$1"
+    
+    log_info "Destroying Vast instance: ${contract_id}"
+    
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        log_info "[DRY RUN] Would run: vastai destroy instance ${contract_id} --yes"
+        return 0
+    fi
+    
+    # Check if instance exists
+    if ! vastai show instance "${contract_id}" &>/dev/null; then
+        log_warn "Instance ${contract_id} not found or already destroyed"
+        return 0
+    fi
+    
+    # Destroy with --yes to skip confirmation
+    if vastai destroy instance "${contract_id}" --yes 2>/dev/null; then
+        log_info "Vast instance ${contract_id} destroyed successfully"
+        return 0
+    else
+        log_error "Failed to destroy Vast instance ${contract_id}"
+        return 5
+    fi
 }
 
 function destroy_proxmox_vm() {
@@ -293,6 +319,10 @@ function cleanup_resources() {
     fi
     
     case "${provider}" in
+        vast)
+            # Vast cleanup — instance destroyed, no further resources
+            log_info "Vast resource cleanup completed"
+            ;;
         proxmox)
             # Cleanup storage and other resources related to this VM
             log_info "Proxmox resource cleanup completed"
@@ -324,8 +354,16 @@ function verify_destruction() {
     local success=false
     
     case "${provider}" in
+        vast)
+            if ! vastai show instance "${vm_id}" &>/dev/null 2>&1; then
+                log_info "Vast instance ${vm_id} successfully destroyed"
+                success=true
+            else
+                log_error "Vast instance ${vm_id} still exists"
+            fi
+            ;;
         proxmox)
-            if ! qm list | grep -q "^${vm_id}\s"; then
+            if ! qm list | grep -q "^${vm_id}\\s"; then
                 log_info "VM ${vm_id} successfully destroyed on Proxmox"
                 success=true
             else
@@ -387,6 +425,13 @@ main() {
     
     # Perform destruction based on provider
     case "${PROVIDER}" in
+        vast)
+            destroy_vast_instance "${VM_IDENTIFIER}" || {
+                echo "LINUS_RESULT:FAILURE"
+                echo "LINUS_ERROR:Vast instance destruction failed"
+                return 5
+            }
+            ;;
         proxmox)
             destroy_proxmox_vm "${VM_IDENTIFIER}" || {
                 echo "LINUS_RESULT:FAILURE"

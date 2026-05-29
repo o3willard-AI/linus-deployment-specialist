@@ -120,7 +120,7 @@ function validate_inputs() {
     
     # Validate provider
     case "${PROVIDER}" in
-        proxmox|aws|qemu)
+        proxmox|aws|qemu|vast)
             log_info "Provider ${PROVIDER} is supported"
             ;;
         *)
