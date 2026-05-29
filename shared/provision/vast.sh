@@ -34,6 +34,9 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+# Ensure Python subprocess output is unbuffered for background visibility
+export PYTHONUNBUFFERED=1
+
 readonly SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -346,19 +349,51 @@ wait_for_running() {
     local contract_id="$ALLOCATED_CONTRACT_ID"
     local max_wait=900  # 15 min — llama.cpp build + SSH startup can take 8-10 min
     local elapsed=0
+    local table_parser="$SCRIPT_DIR/../lib/parse-vast-table.py"
 
     while [[ $elapsed -lt $max_wait ]]; do
         local status
-        # vastai show instance outputs table format, not JSON.
-        # Leading whitespace shifts fields: $3=contract ID, $5=status
+        # Use robust Python table parser — handles leading whitespace, multi-section
+        # tables, and CLI output format changes that break awk column-counting
         status=$(vastai show instance "$contract_id" 2>/dev/null | \
-            awk -v cid="$contract_id" '$3 == cid {print $5}' 2>/dev/null) || status="unknown"
-        # Handle empty/whitespace status during loading (awk prints nothing but exits 0)
+            python3 "$table_parser" status 2>/dev/null) || status="unknown"
+        # Handle empty/whitespace status during loading
         [[ -z "${status// }" ]] && status="loading"
 
         case "$status" in
             running)
-                log_success "Instance running (${elapsed}s)"
+                # Instance is running per Vast API — do a quick SSH probe
+                # to catch hosts with broken SSH proxies (pitfall: "remote port
+                # forwarding failed" spam that Vast API doesn't report)
+                local machine_id ssh_host ssh_port
+                machine_id=$(vastai show instance "$contract_id" 2>/dev/null | \
+                    python3 "$table_parser" machine_id 2>/dev/null) || true
+                ssh_host=$(vastai show instance "$contract_id" 2>/dev/null | \
+                    python3 "$table_parser" ssh_host 2>/dev/null) || true
+                ssh_port=$(vastai show instance "$contract_id" 2>/dev/null | \
+                    python3 "$table_parser" ssh_port 2>/dev/null) || true
+
+                # Quick 3-attempt SSH probe with short timeout
+                if [[ -n "$ssh_host" && -n "$ssh_port" ]]; then
+                    local probe_ok=false
+                    for _ in {1..3}; do
+                        if ssh -o BatchMode=yes -o ConnectTimeout=10 \
+                               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                               -i ~/.ssh/vast-ai-inference \
+                               -p "$ssh_port" "root@${ssh_host}" "echo ALIVE" 2>/dev/null; then
+                            probe_ok=true
+                            break
+                        fi
+                        sleep 3
+                    done
+                    if [[ "$probe_ok" != "true" ]]; then
+                        log_warn "Instance reported 'running' but SSH probe failed — bad host proxy"
+                        ALLOCATED_BAD_HOST_ID="$machine_id"
+                        return 6  # Treat as timeout → caller excludes host
+                    fi
+                fi
+
+                log_success "Instance running + SSH verified (${elapsed}s)"
                 return 0
                 ;;
             created)
@@ -504,13 +539,12 @@ main() {
 
         local run_exit=$?
 
-        # Extract host info before destroying
+        # Extract both host_id and machine_id using robust table parser
         local bad_host=""
-        bad_host=$(vastai show instance "$ALLOCATED_CONTRACT_ID" 2>/dev/null | python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-print(d.get('host_id',''))
-" 2>/dev/null) || true
+        bad_host=$(vastai show instance "$ALLOCATED_CONTRACT_ID" 2>/dev/null | \
+            python3 "$SCRIPT_DIR/../lib/parse-vast-table.py" machine_id 2>/dev/null) || true
+        # Fall back to ALLOCATED_BAD_HOST_ID set by wait_for_running SSH probe
+        [[ -z "$bad_host" ]] && bad_host="${ALLOCATED_BAD_HOST_ID:-}"
 
         # Classify the failure
         case $run_exit in

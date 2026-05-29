@@ -42,6 +42,9 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+# Ensure Python subprocess output is unbuffered for background visibility
+export PYTHONUNBUFFERED=1
+
 readonly SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -86,14 +89,20 @@ readonly CHAT_URL="http://${SSH_HOST}:${PROXY_PORT}/v1/chat/completions"
 # SSH helper — auto-discovers key, builds args
 # -----------------------------------------------------------------------------
 
-_ssh_args() {
-    local ssh_key=""
+_ssh_key() {
     for candidate in ~/.ssh/vast-ai-inference ~/.ssh/id_ed25519 ~/.ssh/id_rsa; do
         if [[ -f "$candidate" ]]; then
-            ssh_key="$candidate"
-            break
+            echo "$candidate"
+            return 0
         fi
     done
+    echo "none"
+}
+
+_ssh_args() {
+    local ssh_key
+    ssh_key=$(_ssh_key)
+    [[ "$ssh_key" == "none" ]] && ssh_key=""
 
     local args=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
     [[ -n "$ssh_key" ]] && args+=(-i "$ssh_key")
@@ -229,24 +238,31 @@ download_model() {
         log_warn "Could not determine model size via Range request — proceeding anyway"
     fi
 
-    # --- Check disk space ---
-    local disk_free
-    disk_free=$(eval "$ssh_cmd \"df -BG ${INSTANCE_WORKSPACE} 2>/dev/null | tail -1 | awk '{print \\$4}' | tr -d 'G'\"" 2>/dev/null) || disk_free=0
-    if [[ "$disk_free" -gt 0 && "$total_bytes" -gt 0 ]]; then
-        local needed_gb
-        needed_gb=$(bc <<< "scale=0; (${total_bytes} * 1.2) / 1073741824" 2>/dev/null || echo "0")
-        if [[ "$disk_free" -lt "$needed_gb" ]]; then
-            log_error "Insufficient disk space: ${disk_free}GB free, need ~${needed_gb}GB"
-            return 5
+    # --- Check disk space (only if we got a real size) ---
+    if [[ "$total_bytes" -gt 0 ]]; then
+        local disk_free
+        # Use single quotes for awk to prevent bash $4 expansion under set -u
+        disk_free=$(eval "$ssh_cmd \"df -BG ${INSTANCE_WORKSPACE} 2>/dev/null | tail -1 | awk '{print \$4}' | tr -d 'G'\"" 2>/dev/null) || disk_free=0
+        if [[ "$disk_free" -gt 0 ]]; then
+            local needed_gb
+            needed_gb=$(bc <<< "scale=0; (${total_bytes} * 1.2) / 1073741824" 2>/dev/null || echo "0")
+            if [[ "$disk_free" -lt "$needed_gb" ]]; then
+                log_error "Insufficient disk space: ${disk_free}GB free, need ~${needed_gb}GB"
+                return 5
+            fi
+            log_info "Disk space OK: ${disk_free}GB free, need ~${needed_gb}GB"
         fi
-        log_info "Disk space OK: ${disk_free}GB free, need ~${needed_gb}GB"
+    else
+        log_warn "Could not determine model size — skipping disk space check"
     fi
 
     # --- Download with multi-strategy retry ---
     # retry_model_download handles: curl with resume, wget fallback,
     # size verification, 5 attempts with exponential backoff
+    local ssh_key
+    ssh_key=$(_ssh_key)
     log_info "Starting model download (multi-strategy, up to 5 attempts)..."
-    if ! retry_model_download "$SSH_HOST" "$SSH_PORT" "none" "$MODEL_URL" "$MODEL_PATH" 5; then
+    if ! retry_model_download "$SSH_HOST" "$SSH_PORT" "$ssh_key" "$MODEL_URL" "$MODEL_PATH" 5; then
         log_error "Model download failed after 5 attempts"
         return 5
     fi
