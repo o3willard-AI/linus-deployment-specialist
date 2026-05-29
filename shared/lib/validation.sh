@@ -303,11 +303,10 @@ validate_vm_spec() {
 # GPU Validation (Vast provider)
 # -----------------------------------------------------------------------------
 
-# Source GPU reference tables from vast-sizing.sh
-_VALIDATION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -z "${LINUS_VAST_SIZING_LOADED:-}" ]]; then
-    source "${_VALIDATION_LIB_DIR}/vast-sizing.sh"
-fi
+# GPU reference tables are sourced by caller scripts (vast.sh, vast-gpu.sh)
+# before validation.sh is loaded. validate_gpu_type() accesses GPU_ARCH
+# which is already populated at call time.
+# If running standalone, source vast-sizing.sh manually first.
 
 # Validate GPU model name and output CUDA architecture flag
 # Usage: arch=$(validate_gpu_type "RTX_3090") || exit 1

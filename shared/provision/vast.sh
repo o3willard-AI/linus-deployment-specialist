@@ -85,7 +85,7 @@ _linus_vast_discover_credentials() {
         "$HOME/.hermes/secrets"
         "$HOME/.hermes/env"
     )
-    local cred_files=("vast-api-key" "vast-token" "vast")
+    local cred_files=("vast-api-key" "vast-ai-api-key" "vast-token" "vast")
 
     for dir in "${secret_dirs[@]}"; do
         for fname in "${cred_files[@]}"; do
@@ -344,7 +344,7 @@ wait_for_running() {
     log_step "4" "Waiting for instance to reach 'running' state"
 
     local contract_id="$ALLOCATED_CONTRACT_ID"
-    local max_wait=600
+    local max_wait=900  # 15 min — llama.cpp build + SSH startup can take 8-10 min
     local elapsed=0
 
     while [[ $elapsed -lt $max_wait ]]; do
@@ -354,6 +354,8 @@ wait_for_running() {
         # Status is column 4. Match row by contract ID to be precise.
         status=$(vastai show instance "$contract_id" 2>/dev/null | \
             awk -v cid="$contract_id" '$2 == cid {print $4}' 2>/dev/null) || status="unknown"
+        # Handle empty/whitespace status during loading (awk prints nothing but exits 0)
+        [[ -z "${status// }" ]] && status="loading"
 
         case "$status" in
             running)
