@@ -399,8 +399,12 @@ wait_for_running() {
                     if [[ "$probe_ok" != "true" ]]; then
                         log_warn "Instance reported 'running' but SSH probe failed — bad host proxy"
                         ALLOCATED_BAD_HOST_ID="$machine_id"
-                        return 6  # Treat as timeout → caller excludes host
+                        return 6
                     fi
+                    # SSH verified — populate globals so wait_for_ssh can be skipped
+                    ALLOCATED_SSH_HOST="$ssh_host"
+                    ALLOCATED_SSH_PORT="$ssh_port"
+                    ALLOCATED_PROXY_PORT="$((ssh_port + 1))"
                 fi
 
                 log_success "Instance running + SSH verified (${elapsed}s)"
@@ -608,8 +612,13 @@ main() {
         exit 5
     fi
 
-    # Instance is running — proceed with SSH and output
-    wait_for_ssh || exit $?
+    # Instance is running — SSH was verified by the probe in wait_for_running.
+    # Only re-verify if SSH details weren't populated (shouldn't happen, but safety net).
+    if [[ -z "${ALLOCATED_SSH_HOST:-}" ]]; then
+        wait_for_ssh || exit $?
+    else
+        log_info "SSH already verified: ${ALLOCATED_SSH_HOST}:${ALLOCATED_SSH_PORT} (proxy: ${ALLOCATED_PROXY_PORT})"
+    fi
     output_result
 
     trap - EXIT
