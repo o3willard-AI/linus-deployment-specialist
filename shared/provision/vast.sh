@@ -467,13 +467,24 @@ wait_for_ssh() {
         fi
     done
 
-    # Multi-strategy SSH retry: 4 strategies × 3 attempts with backoff
-    if retry_ssh_with_backoff 3 "$ssh_host" "$ssh_port" "$ssh_key" "echo ok"; then
-        log_success "SSH ready at ${ssh_host}:${ssh_port}}"
+    # SSH was already verified by the probe in wait_for_running.
+    # Single confirmation here — aggressive retry triggers Vast proxy rate limits.
+    log_info "Verifying SSH (single attempt, already probed)..."
+    local ssh_cmd="ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+    [[ -n "$ssh_key" && "$ssh_key" != "none" ]] && ssh_cmd="$ssh_cmd -i $ssh_key"
+    if $ssh_cmd -p "$ssh_port" "root@${ssh_host}" "echo ok" 2>/dev/null; then
+        log_success "SSH ready at ${ssh_host}:${ssh_port}"
         return 0
     fi
 
-    log_error "SSH not accessible after multi-strategy retry"
+    # One retry with 5s delay if first attempt fails
+    sleep 5
+    if $ssh_cmd -p "$ssh_port" "root@${ssh_host}" "echo ok" 2>/dev/null; then
+        log_success "SSH ready at ${ssh_host}:${ssh_port} (2nd attempt)"
+        return 0
+    fi
+
+    log_error "SSH not accessible after 2 attempts"
     return 6
 }
 
