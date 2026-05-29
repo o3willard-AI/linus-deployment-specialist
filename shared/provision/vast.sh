@@ -437,14 +437,15 @@ wait_for_ssh() {
     log_step "5" "Waiting for SSH access"
 
     local contract_id="$ALLOCATED_CONTRACT_ID"
+    local table_parser="$SCRIPT_DIR/../lib/parse-vast-table.py"
 
-    # Fetch SSH details from Vast API
-    local instance_json
-    instance_json=$(vastai show instance "$contract_id" 2>/dev/null) || true
+    # Fetch SSH details from Vast API table output (not JSON)
+    local instance_output
+    instance_output=$(vastai show instance "$contract_id" 2>/dev/null) || true
 
     local ssh_host ssh_port
-    ssh_host=$(echo "$instance_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('ssh_host',''))" 2>/dev/null) || true
-    ssh_port=$(echo "$instance_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('ssh_port',''))" 2>/dev/null) || true
+    ssh_host=$(echo "$instance_output" | python3 "$table_parser" ssh_host 2>/dev/null) || true
+    ssh_port=$(echo "$instance_output" | python3 "$table_parser" ssh_port 2>/dev/null) || true
 
     if [[ -z "$ssh_host" || -z "$ssh_port" ]]; then
         log_error "Failed to parse SSH details"
