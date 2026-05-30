@@ -56,8 +56,8 @@ readonly VAST_MODEL_FALLBACKS="${VAST_MODEL_FALLBACKS:-}"
 readonly VAST_FLASH_ATTN="${VAST_FLASH_ATTN:-true}"
 
 # Paths
-readonly PROVISION_SCRIPT="$SCRIPT_DIR/provision/vast.sh"
-readonly BOOTSTRAP_SCRIPT="$SCRIPT_DIR/bootstrap/vast-gpu.sh"
+readonly PROVISION_SCRIPT="$SCRIPT_DIR/vast.sh"
+readonly BOOTSTRAP_SCRIPT="$SCRIPT_DIR/../bootstrap/vast-gpu.sh"
 
 # ─── Validation ────────────────────────────────────────────────────
 
@@ -91,8 +91,10 @@ parse_linus_result() {
     local key val
 
     while IFS=':' read -r key val; do
-        key="${key##LINUS_RESULT:}"  # Strip LINUS_RESULT prefix
-        key="${key##SUCCESS }"       # Strip SUCCESS prefix
+        # Strip "LINUS_" prefix from the key (e.g., LINUS_CONTRACT_ID → CONTRACT_ID)
+        key="${key#LINUS_}"
+        # Skip the "RESULT:SUCCESS" / "RESULT:FAILURE" header line
+        [[ "$key" == "RESULT" ]] && continue
         case "$key" in
             CONTRACT_ID)     PARSED_CONTRACT_ID="$val" ;;
             SSH_HOST)        PARSED_SSH_HOST="$val" ;;
@@ -101,7 +103,7 @@ parse_linus_result() {
             INSTANCE_PRICE)  PARSED_INSTANCE_PRICE="$val" ;;
             GPU)             PARSED_GPU="$val" ;;
         esac
-    done < <(echo "$output" | tr ' ' '\n')
+    done < <(echo "$output" | grep -E '^LINUS_' || true)
 }
 
 # ─── Phase 1: Provision ────────────────────────────────────────────
