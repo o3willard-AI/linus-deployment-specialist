@@ -32,6 +32,8 @@
 #   4 - Proxmox node offline
 #   5 - VM creation failed
 #   6 - Network/SSH timeout
+#   7 - SSH credentials required (PROXMOX_SSH_PASS not set for template bootstrap)
+#   9 - Template bootstrap needed (human intervention: provide SSH credentials)
 #
 # =============================================================================
 
@@ -104,6 +106,25 @@ readonly VM_CPU="${VM_CPU:-2}"
 readonly VM_RAM="${VM_RAM:-2048}"
 readonly VM_DISK="${VM_DISK:-20}"
 
+# ─── ISO Bootstrap Configuration ─────────────────────────────────
+# When no templates exist, the deployment specialist can download cloud
+# images via the Proxmox API (no SSH needed) and create templates via
+# a one-time SSH qm importdisk call. This is the self-healing path.
+readonly ISO_STORAGE="${ISO_STORAGE:-local}"                     # Storage for ISO downloads (must support 'iso' content type)
+readonly TEMPLATE_STORAGE="${TEMPLATE_STORAGE:-local-lvm}"       # Storage for imported VM disk
+readonly TEMPLATE_BASE_ID="${TEMPLATE_BASE_ID:-9005}"            # First VM ID for auto-created templates (9005-9010 range)
+readonly BOOTSTRAP_TEMPLATE="${BOOTSTRAP_TEMPLATE:-false}"       # Set to 'true' to create template from ISO when none exist
+readonly BOOTSTRAP_TIMEOUT="${BOOTSTRAP_TIMEOUT:-900}"           # Max seconds for ISO download (600-900 MB images)
+
+# Known-good cloud image URLs — stable, vendor-published, cloud-init ready
+declare -A KNOWN_CLOUD_IMAGES=(
+    [ubuntu-2404]="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img|ubuntu-24.04-cloudimg-amd64.img|sha256:|~600 MB|Ubuntu 24.04 LTS (Noble Numbat)"
+    [ubuntu-2204]="https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img|ubuntu-22.04-cloudimg-amd64.img|sha256:|~550 MB|Ubuntu 22.04 LTS (Jammy Jellyfish)"
+    [almalinux-9]="https://repo.almalinux.org/almalinux/9/cloud/x86_64/images/AlmaLinux-9-GenericCloud-latest.x86_64.qcow2|alma-9-cloudimg-amd64.qcow2|sha256:|~900 MB|AlmaLinux 9"
+    [debian-12]="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2|debian-12-cloudimg-amd64.qcow2|sha256:|~500 MB|Debian 12 (Bookworm)"
+    [rocky-9]="https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base.latest.x86_64.qcow2|rocky-9-cloudimg-amd64.qcow2|sha256:|~900 MB|Rocky Linux 9"
+)
+
 # Global variables (set by functions)
 ALLOCATED_VM_ID=""
 VM_IP=""
@@ -112,6 +133,10 @@ SELECTED_TEMPLATE_ID=""     # Set by select_template
 SELECTED_TEMPLATE_OSTYPE="" # Set by select_template
 DISCOVERED_TEMPLATES=()     # Array of "id:name:ostype" — set by discover_templates
 LINUS_WARNINGS=()           # Accumulated non-fatal warning tags (§3.1.6)
+DOWNLOADED_ISO_VOLID=""     # Set by download_cloud_image
+DOWNLOADED_ISO_FILENAME=""  # Set by download_cloud_image
+_CREATED_TEMPLATE_ID=""     # Set by create_template_from_image
+PROXMOX_FREE_RAM_MB=0       # Set by discover_host_capacity
 readonly PROVISION_START_TIME=$(date +%s)  # For LINUS_COST wall time tracking
 
 # ─── Warning Helper ───────────────────────────────────────────────
@@ -273,6 +298,37 @@ _linus_llm_eval() {
     python3 "$eval_script" "$mode" <<< "$input_text" 2>/dev/null || true
 }
 
+# ─── Template Bootstrap Handler ───────────────────────────────────
+# Called when discover_templates() or select_template() fails.
+# If PROXMOX_SSH_PASS is set, auto-bootstraps from ISO.
+# Otherwise, outputs NEEDS_TEMPLATE_BOOTSTRAP for the operating agent.
+# Returns: 0 if bootstrapped successfully, non-zero to abort
+# ───────────────────────────────────────────────────────────────────
+
+_handle_missing_templates() {
+    local os_key="${VM_OS_TYPE:-ubuntu}"
+
+    # Auto-bootstrap path: SSH credentials available + bootstrap requested
+    if [[ "${BOOTSTRAP_TEMPLATE:-false}" == "true" ]] && [[ -n "${PROXMOX_SSH_PASS:-}" ]]; then
+        log_warn "No templates found — attempting auto-bootstrap from cloud image"
+        if bootstrap_template_from_iso "$os_key"; then
+            # Re-run template discovery/selection with fresh data
+            if discover_templates && select_template; then
+                log_success "Template bootstrap successful — proceeding with provisioning"
+                return 0
+            fi
+            log_error "Template created but selection still failed"
+            return 3
+        fi
+        log_error "Template bootstrap failed"
+        return 5
+    fi
+
+    # Agent information path: no SSH credentials — tell the operating agent
+    output_bootstrap_instructions "$os_key"
+    return 9  # Exit code 9 = "needs human intervention (template bootstrap)"
+}
+
 # -----------------------------------------------------------------------------
 # Function: validate_environment
 # -----------------------------------------------------------------------------
@@ -319,13 +375,11 @@ validate_environment() {
     # Check templates exist via discovery (single API call, no 404 problem)
     log_info "Checking templates..."
     if ! discover_templates; then
-        log_error "No templates found on node ${PROXMOX_NODE} — cannot provision VMs"
-        return 3
+        _handle_missing_templates || return $?
     fi
     
     if ! select_template; then
-        log_error "No suitable template found for OS type ${VM_OS_TYPE}"
-        return 3
+        _handle_missing_templates || return $?
     fi
 
     # Validate OS type
@@ -648,6 +702,442 @@ Select the best template VM ID." 2>/dev/null) || llm_choice=""
 read_template_config() {
     local template_id="$1"
     _pvesh get "/nodes/${PROXMOX_NODE}/qemu/${template_id}/config" 2>/dev/null || echo "{}"
+}
+
+# =============================================================================
+# Template Bootstrap Functions (ISO download + template creation)
+# =============================================================================
+# These functions implement the self-healing path when no VM templates exist:
+#   1. Download cloud image via Proxmox API (no SSH)
+#   2. Import disk + create template via SSH (one-time qm importdisk)
+#   3. Re-discover templates (the new one now exists)
+#
+# When PROXMOX_SSH_PASS is NOT set, output NEEDS_TEMPLATE_BOOTSTRAP instead of
+# failing — the operating agent informs the user and collects SSH credentials.
+# =============================================================================
+
+# ─── get_known_iso_info ────────────────────────────────────────────
+# Returns the known cloud image info for an OS type.
+# Output format: url|filename|checksum_type:checksum|size|description
+# Args: os_key (e.g., "ubuntu-2404", "almalinux-9")
+# Returns: pipe-delimited info on stdout, empty on unknown OS
+# ───────────────────────────────────────────────────────────────────
+
+get_known_iso_info() {
+    local os_key="$1"
+    # Map VM_OS_TYPE values to our known image keys
+    case "${os_key}" in
+        ubuntu|ubuntu2404) os_key="ubuntu-2404" ;;
+        ubuntu2204|jammy)  os_key="ubuntu-2204" ;;
+        almalinux|alma9)   os_key="almalinux-9" ;;
+        debian|debian12)   os_key="debian-12" ;;
+        rocky|rocky9)      os_key="rocky-9" ;;
+    esac
+    echo "${KNOWN_CLOUD_IMAGES[$os_key]:-}"
+}
+
+# ─── find_iso_in_storage ───────────────────────────────────────────
+# Checks whether a cloud image ISO already exists in Proxmox storage.
+# Args: filename (e.g. "ubuntu-24.04-cloudimg-amd64.img")
+# Returns: 0 and prints volid on stdout if found, 1 if not found
+# ───────────────────────────────────────────────────────────────────
+
+find_iso_in_storage() {
+    local target_filename="$1"
+    local storage="${2:-${ISO_STORAGE}}"
+
+    log_info "Checking for existing ISO in storage ${storage}..."
+
+    local content_json
+    content_json=$(_pvesh get "/nodes/${PROXMOX_NODE}/storage/${storage}/content" 2>/dev/null) || {
+        log_warn "Could not query storage content"
+        return 1
+    }
+
+    # Search for matching filename
+    local found
+    found=$(echo "$content_json" | python3 -c "
+import json, sys
+data = json.load(sys.stdin).get('data', [])
+for item in data:
+    volid = item.get('volid', '')
+    if '${target_filename}' in volid:
+        print(volid)
+        break
+" 2>/dev/null)
+
+    if [[ -n "$found" ]]; then
+        log_success "ISO already exists: ${found}"
+        echo "$found"
+        return 0
+    fi
+
+    log_info "ISO '${target_filename}' not found in storage"
+    return 1
+}
+
+# ─── download_cloud_image ──────────────────────────────────────────
+# Downloads a cloud image ISO via the Proxmox download-url API.
+# Args: os_key, [filename], [checksum]
+# Returns: 0 on success (sets DOWNLOADED_ISO_VOLID), non-zero on failure
+# ───────────────────────────────────────────────────────────────────
+
+download_cloud_image() {
+    local os_key="$1"
+    local custom_filename="${2:-}"
+    local checksum="${3:-}"
+
+    local iso_info
+    iso_info=$(get_known_iso_info "$os_key")
+    if [[ -z "$iso_info" ]]; then
+        log_error "No known cloud image URL for OS: ${os_key}"
+        return 9
+    fi
+
+    local iso_url filename iso_size description
+    IFS='|' read -r iso_url filename _checksum_info iso_size description <<< "$iso_info"
+    filename="${custom_filename:-$filename}"
+
+    log_step "B1" "Downloading ${description} cloud image"
+    log_info "  URL: ${iso_url}"
+    log_info "  Filename: ${filename}"
+    log_info "  Size: ${iso_size}"
+    log_info "  Storage: ${ISO_STORAGE}"
+
+    # First check if already downloaded
+    local existing
+    if existing=$(find_iso_in_storage "$filename" 2>/dev/null) && [[ -n "$existing" ]]; then
+        DOWNLOADED_ISO_VOLID="$existing"
+        DOWNLOADED_ISO_FILENAME="$filename"
+        log_success "Using existing ISO: ${existing}"
+        return 0
+    fi
+
+    # Build the download request payload
+    local payload
+    payload=$(python3 -c "
+import json
+payload = {
+    'content': 'iso',
+    'filename': '${filename}',
+    'url': '${iso_url}',
+    'node': '${PROXMOX_NODE}',
+    'storage': '${ISO_STORAGE}'
+}
+if '${checksum}': payload['checksum'] = '${checksum}'
+if '${checksum}' and 'sha256' in '${checksum}': payload['checksum-algorithm'] = 'sha256'
+json.dump(payload, open('/tmp/linus-iso-payload.json', 'w'))
+")
+
+    # Fire the download — this is async (returns UPID like clone)
+    local response upid
+    response=$(curl -sk --fail -X POST \
+        -H "Authorization: PVEAPIToken=${PROXMOX_USER}!${PROXMOX_TOKEN_ID}=${PROXMOX_TOKEN_SECRET}" \
+        -H "Content-Type: application/json" \
+        --data-binary @/tmp/linus-iso-payload.json \
+        "https://${PROXMOX_HOST}:8006/api2/json/nodes/${PROXMOX_NODE}/storage/${ISO_STORAGE}/download-url" 2>&1) || {
+        local exit_code=$?
+        log_error "ISO download request failed (curl exit ${exit_code}): ${response}"
+        rm -f /tmp/linus-iso-payload.json
+        return 5
+    }
+    rm -f /tmp/linus-iso-payload.json
+
+    upid=$(echo "$response" | python3 -c "import json,sys; print(json.load(sys.stdin).get('data',''))" 2>/dev/null)
+    if [[ -z "$upid" ]]; then
+        log_error "No task UPID in download response: ${response}"
+        return 5
+    fi
+
+    log_info "Download started — task: ${upid}"
+
+    # Poll until download completes
+    if ! poll_download_task "$upid" "$BOOTSTRAP_TIMEOUT"; then
+        log_error "ISO download failed or timed out"
+        return 5
+    fi
+
+    # Verify the ISO appears in storage
+    local verify_volid
+    verify_volid=$(find_iso_in_storage "$filename" 2>/dev/null) || true
+    if [[ -z "$verify_volid" ]]; then
+        log_error "ISO download task completed but file not found in storage"
+        return 5
+    fi
+
+    DOWNLOADED_ISO_VOLID="$verify_volid"
+    DOWNLOADED_ISO_FILENAME="$filename"
+    log_success "Cloud image downloaded: ${verify_volid}"
+    return 0
+}
+
+# ─── poll_download_task ────────────────────────────────────────────
+# Polls an async Proxmox task (from download-url) until completion.
+# Args: upid, [timeout_seconds=900]
+# Returns: 0 on success, 1 on timeout, 2 on task failure
+# ───────────────────────────────────────────────────────────────────
+
+poll_download_task() {
+    local upid="$1"
+    local timeout="${2:-900}"
+    local elapsed=0
+    local interval=10
+
+    log_info "Waiting for download to complete (timeout: ${timeout}s)..."
+
+    while [[ $elapsed -lt $timeout ]]; do
+        local status_json
+        status_json=$(_pvesh get "/nodes/${PROXMOX_NODE}/tasks/${upid}/status" 2>/dev/null) || {
+            sleep $interval
+            elapsed=$((elapsed + interval))
+            continue
+        }
+
+        local task_status exitstatus
+        task_status=$(echo "$status_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('data',{}).get('status',''))" 2>/dev/null)
+        exitstatus=$(echo "$status_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('data',{}).get('exitstatus',''))" 2>/dev/null)
+
+        case "$task_status" in
+            stopped)
+                if [[ "$exitstatus" == "OK" ]]; then
+                    log_success "Download completed (${elapsed}s)"
+                    return 0
+                else
+                    log_error "Download task failed: ${exitstatus}"
+                    return 2
+                fi
+                ;;
+            "")
+                # Task not yet available — keep polling
+                ;;
+        esac
+
+        # Progress indicator every 30 seconds
+        if [[ $((elapsed % 30)) -eq 0 && $elapsed -gt 0 ]]; then
+            log_info "  Download in progress... (${elapsed}s elapsed)"
+        fi
+
+        sleep $interval
+        elapsed=$((elapsed + interval))
+    done
+
+    log_error "Download timed out after ${timeout}s"
+    return 1
+}
+
+# ─── create_template_from_image ────────────────────────────────────
+# Converts a downloaded cloud image into a Proxmox VM template.
+# THIS IS THE ONLY FUNCTION THAT REQUIRES SSH TO THE PROXMOX HOST.
+# Uses qm importdisk + qm template — no REST API equivalent exists.
+#
+# Args: template_vmid, os_type (e.g. "ubuntu"), cpu_cores, ram_mb, disk_gb
+# Requires: PROXMOX_SSH_PASS (temporary, not stored), DOWNLOADED_ISO_FILENAME
+# Returns: 0 on success, non-zero on failure
+# ───────────────────────────────────────────────────────────────────
+
+create_template_from_image() {
+    local template_vmid="$1"
+    local os_type="${2:-ubuntu}"
+    local cpu="${3:-2}"
+    local ram="${4:-2048}"
+    local disk="${5:-20}"
+
+    if [[ -z "${PROXMOX_SSH_PASS:-}" ]]; then
+        log_error "PROXMOX_SSH_PASS is required for template creation (qm importdisk needs SSH)"
+        log_error "This is a one-time operation per OS image. Set PROXMOX_SSH_PASS and re-run."
+        return 7
+    fi
+
+    if [[ -z "${DOWNLOADED_ISO_FILENAME:-}" ]]; then
+        log_error "No ISO filename — run download_cloud_image first"
+        return 3
+    fi
+
+    local iso_path="/var/lib/vz/template/iso/${DOWNLOADED_ISO_FILENAME}"
+    local ostype_flag
+
+    # Map OS type to Proxmox ostype flag
+    case "$os_type" in
+        ubuntu|debian) ostype_flag="l26" ;;   # Linux 2.6+ kernel
+        almalinux|rocky) ostype_flag="l26" ;;
+        *) ostype_flag="l26" ;;
+    esac
+
+    log_step "B2" "Creating VM template from cloud image"
+    log_info "  VM ID: ${template_vmid}"
+    log_info "  OS type: ${os_type} (ostype=${ostype_flag})"
+    log_info "  CPU: ${cpu} cores, RAM: ${ram} MB, Disk: ${disk} GB"
+    log_info "  ISO path: ${iso_path}"
+    log_info "  Storage: ${TEMPLATE_STORAGE}"
+    log_info "  THIS REQUIRES TEMPORARY SSH ACCESS TO PROXMOX HOST (one-time)"
+
+    # Write a local script that will be scp'd to Proxmox host and executed.
+    # This avoids the escaping nightmare of inline SSH commands.
+    local script_path="/tmp/linus-create-template-${template_vmid}.sh"
+    python3 -c "
+script = '''#!/bin/bash
+set -euo pipefail
+echo \"[qm] Creating VM ${template_vmid}...\"
+qm create ${template_vmid} \\
+    --name '${os_type}-cloud-template' \\
+    --memory ${ram} \\
+    --cores ${cpu} \\
+    --net0 virtio,bridge=vmbr0 \\
+    --ostype ${ostype_flag} \\
+    --scsihw virtio-scsi-pci
+
+echo \"[qm] Importing disk from ${iso_path}...\"
+qm importdisk ${template_vmid} '${iso_path}' ${TEMPLATE_STORAGE}
+
+echo \"[qm] Attaching disk...\"
+UNUSED=\$(qm config ${template_vmid} | grep -E '^unused0:' | cut -d' ' -f2)
+qm set ${template_vmid} --scsi0 \"\${UNUSED}\"
+
+echo \"[qm] Configuring cloud-init...\"
+qm set ${template_vmid} --ide2 ${TEMPLATE_STORAGE}:cloudinit
+qm set ${template_vmid} --boot c --bootdisk scsi0
+qm set ${template_vmid} --serial0 socket --vga serial0
+qm set ${template_vmid} --agent enabled=1
+qm set ${template_vmid} --cpu host
+
+echo \"[qm] Converting to template...\"
+qm template ${template_vmid}
+
+echo \"TEMPLATE_OK:${template_vmid}\"
+'''
+with open('${script_path}', 'w') as f:
+    f.write(script)
+"
+
+    # Copy script to Proxmox host
+    local scp_result
+    scp_result=$(sshpass -p "${PROXMOX_SSH_PASS}" scp \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=10 \
+        "${script_path}" "root@${PROXMOX_HOST}:/tmp/linus-create-template.sh" 2>&1) || {
+        log_error "Failed to copy template creation script to Proxmox host:"
+        log_error "${scp_result}"
+        rm -f "${script_path}"
+        return 5
+    }
+    rm -f "${script_path}"
+
+    # Execute the script on Proxmox host
+    local ssh_result
+    ssh_result=$(sshpass -p "${PROXMOX_SSH_PASS}" ssh \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=10 \
+        -o ServerAliveInterval=30 \
+        "root@${PROXMOX_HOST}" \
+        "bash /tmp/linus-create-template.sh && rm -f /tmp/linus-create-template.sh" 2>&1) || {
+        log_error "Template creation via SSH failed:"
+        log_error "${ssh_result}"
+        return 5
+    }
+
+    log_info "qm output: ${ssh_result}"
+
+    if echo "$ssh_result" | grep -q "TEMPLATE_OK:${template_vmid}"; then
+        log_success "Template ${template_vmid} created from cloud image"
+        _CREATED_TEMPLATE_ID="${template_vmid}"
+        return 0
+    fi
+
+    log_error "Template creation output did not confirm success"
+    return 5
+}
+
+# ─── bootstrap_template_from_iso ───────────────────────────────────
+# Full bootstrap flow: download ISO → create template → re-discover.
+# This is the single entry point for the self-healing path.
+#
+# Args: os_key (e.g., "ubuntu-2404")
+# Requires: PROXMOX_SSH_PASS (temporary, for qm importdisk only)
+# Returns: 0 on success (template created + discoverable), non-zero on failure
+# ───────────────────────────────────────────────────────────────────
+
+bootstrap_template_from_iso() {
+    local os_key="$1"
+    local template_vmid="${TEMPLATE_BASE_ID}"
+
+    log_header "Template Bootstrap — Creating template from cloud image"
+    log_info "No templates found. Bootstrapping ${os_key} template from ISO."
+    log_info "This downloads ~600-900 MB via Proxmox API (no SSH) + one SSH command."
+
+    # Step 1: Download cloud image via API
+    if ! download_cloud_image "$os_key"; then
+        log_error "Failed to download cloud image for ${os_key}"
+        return 5
+    fi
+
+    # Step 2: Create template from downloaded image (SSH required here)
+    if ! create_template_from_image "$template_vmid" "${VM_OS_TYPE}" "$VM_CPU" "$VM_RAM" "$VM_DISK"; then
+        log_error "Failed to create template from cloud image"
+        return 5
+    fi
+
+    # Step 3: Re-discover templates (the new one should appear)
+    log_info "Re-discovering templates after bootstrap..."
+    if ! discover_templates; then
+        log_error "Template ${template_vmid} created but not discoverable — check storage"
+        return 5
+    fi
+
+    # Step 4: Verify the new template is in the list
+    local found_new=false
+    for t in "${DISCOVERED_TEMPLATES[@]}"; do
+        if [[ "${t%%:*}" == "${template_vmid}" ]]; then
+            found_new=true
+            break
+        fi
+    done
+
+    if [[ "$found_new" != "true" ]]; then
+        log_error "Template ${template_vmid} created but not found in discovery"
+        return 5
+    fi
+
+    log_success "Template bootstrap complete — VM ${template_vmid} ready for cloning"
+    return 0
+}
+
+# ─── output_bootstrap_instructions ─────────────────────────────────
+# Outputs structured NEEDS_TEMPLATE_BOOTSTRAP result for the operating agent.
+# The agent reads this and prompts the user for temporary SSH credentials.
+# ───────────────────────────────────────────────────────────────────
+
+output_bootstrap_instructions() {
+    local os_key="$1"
+    local iso_info
+    iso_info=$(get_known_iso_info "$os_key")
+
+    if [[ -z "$iso_info" ]]; then
+        linus_failure "No known cloud image for OS: ${os_key}" \
+            "BOOTSTRAP_AVAILABLE_OS:ubuntu-2404 ubuntu-2204 almalinux-9 debian-12 rocky-9"
+        return 9
+    fi
+
+    local iso_url filename iso_size description
+    IFS='|' read -r iso_url filename _checksum iso_size description <<< "$iso_info"
+
+    log_info "No templates found on node ${PROXMOX_NODE}"
+    log_info "Template bootstrap required — operating agent will request SSH credentials"
+
+    linus_result "NEEDS_TEMPLATE_BOOTSTRAP" \
+        "BOOTSTRAP_NODE:${PROXMOX_NODE}" \
+        "BOOTSTRAP_OS_KEY:${os_key}" \
+        "BOOTSTRAP_OS_TYPE:${VM_OS_TYPE}" \
+        "BOOTSTRAP_OS_DESCRIPTION:${description}" \
+        "BOOTSTRAP_ISO_URL:${iso_url}" \
+        "BOOTSTRAP_ISO_FILENAME:${filename}" \
+        "BOOTSTRAP_ISO_SIZE:${iso_size}" \
+        "BOOTSTRAP_STORAGE:${ISO_STORAGE}" \
+        "BOOTSTRAP_TEMPLATE_STORAGE:${TEMPLATE_STORAGE}" \
+        "BOOTSTRAP_TEMPLATE_ID:${TEMPLATE_BASE_ID}" \
+        "BOOTSTRAP_STEPS:1) Download ISO via Proxmox API (no SSH, ~${iso_size}) → 2) Import disk + create template via SSH (one-time, needs PROXMOX_SSH_PASS) → 3) Clone template + provision as normal" \
+        "BOOTSTRAP_INSTRUCTIONS:Set PROXMOX_SSH_PASS (temporary, not stored) and re-run with BOOTSTRAP_TEMPLATE=true to auto-create the template. Or provide SSH credentials to the operating agent."
 }
 
 # -----------------------------------------------------------------------------
