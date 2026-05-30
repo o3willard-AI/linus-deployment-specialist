@@ -275,7 +275,7 @@ remote_execute() {
     local ssh_key="$3"
     shift 3
 
-    local ssh_args=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+    local ssh_args=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=3)
     [[ -n "$ssh_key" && "$ssh_key" != "none" ]] && ssh_args+=(-i "$ssh_key")
     ssh_args+=(-p "$ssh_port")
 
@@ -303,7 +303,7 @@ retry_model_download() {
     local model_path="$5"
     local max_attempts="${6:-5}"
 
-    local ssh_args=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+    local ssh_args=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=3)
     [[ -n "$ssh_key" && "$ssh_key" != "none" ]] && ssh_args+=(-i "$ssh_key")
     ssh_args+=(-p "$ssh_port")
 

@@ -60,7 +60,8 @@ _linus_check_disk_space() {
     fi
 
     local disk_free
-    disk_free=$(eval "$ssh_cmd \"df -BG ${workspace} 2>/dev/null | tail -1 | awk '{print \$4}' | tr -d 'G'\"") || disk_free=0
+    # Use python3 to parse df output — avoids awk $4 expansion under set -u
+    disk_free=$(eval "$ssh_cmd \"df -BG ${workspace} 2>/dev/null | python3 -c 'import sys; lines=[l.split() for l in sys.stdin if l.strip()]; print(lines[-1][3].rstrip(\\\"G\\\")) if len(lines)>0 and len(lines[-1])>3 else print(0)'\"") || disk_free=0
 
     if [[ "$disk_free" -le 0 ]]; then
         log_warn "Could not determine free disk space — proceeding anyway"
