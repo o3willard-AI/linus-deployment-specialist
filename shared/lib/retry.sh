@@ -259,10 +259,41 @@ retry_ssh_with_backoff() {
 # Model Download Recovery
 # -----------------------------------------------------------------------------
 
+# -----------------------------------------------------------------------------
+# Remote Command Execution (scp+execute pattern)
+# -----------------------------------------------------------------------------
+# Vast proxy frequently drops multi-line inline SSH commands (exit 255,
+# only welcome banner). The reliable pattern: scp a script, then execute it.
+#
+# remote_execute <ssh_host> <ssh_port> <ssh_key> <commands...>
+#   Writes commands to /tmp/hermes-cmd.sh on remote, executes it.
+#   Returns exit code of remote script.
+#   ssh_key can be "" to auto-discover, or "none" to skip -i flag.
+remote_execute() {
+    local ssh_host="$1"
+    local ssh_port="$2"
+    local ssh_key="$3"
+    shift 3
+
+    local ssh_args=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+    [[ -n "$ssh_key" && "$ssh_key" != "none" ]] && ssh_args+=(-i "$ssh_key")
+    ssh_args+=(-p "$ssh_port")
+
+    # Write commands to remote /tmp
+    printf '%s\n' "$@" | ssh "${ssh_args[@]}" "root@${ssh_host}" "cat > /tmp/hermes-cmd.sh" 2>/dev/null || {
+        log_warn "[remote] Failed to upload command script"
+        return 1
+    }
+
+    # Execute and capture exit code
+    ssh "${ssh_args[@]}" "root@${ssh_host}" "bash /tmp/hermes-cmd.sh" 2>/dev/null
+}
+
 # retry_model_download <ssh_host> <ssh_port> <ssh_key> <model_url> <model_path> <max_attempts>
 #   Downloads model with multi-strategy recovery:
 #     1. curl with resume support (-C -)
 #     2. wget fallback (some hosts have broken curl)
+#   Uses scp+execute pattern to avoid Vast proxy multi-line SSH failures.
 #   Returns 0 on success, 5 on all failures.
 retry_model_download() {
     local ssh_host="$1"
@@ -272,8 +303,9 @@ retry_model_download() {
     local model_path="$5"
     local max_attempts="${6:-5}"
 
-    local ssh_base="ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
-    [[ -n "$ssh_key" && "$ssh_key" != "none" ]] && ssh_base="$ssh_base -i $ssh_key"
+    local ssh_args=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+    [[ -n "$ssh_key" && "$ssh_key" != "none" ]] && ssh_args+=(-i "$ssh_key")
+    ssh_args+=(-p "$ssh_port")
 
     local model_dir
     model_dir=$(dirname "$model_path")
@@ -294,12 +326,13 @@ retry_model_download() {
 
         log_info "[download] Attempt ${attempt}/${max_attempts}: curl with resume"
 
-        # Strategy 1: curl with resume support
-        local dl_cmd="mkdir -p ${model_dir} && cd ${model_dir} && curl -L -C - -o ${model_file} '${model_url}' --connect-timeout 30 --max-time 3600 --retry 3 --progress-bar"
-        if $ssh_base -p "$ssh_port" "root@${ssh_host}" "$dl_cmd" 2>/dev/null; then
+        # Strategy 1: curl via scp+execute
+        local dl_script="mkdir -p ${model_dir} && cd ${model_dir} && curl -L -C - -o '${model_file}' '${model_url}' --connect-timeout 30 --max-time 3600 --retry 3 --progress-bar"
+        printf '%s\n' "$dl_script" | ssh "${ssh_args[@]}" "root@${ssh_host}" "cat > /tmp/hermes-dl.sh" 2>/dev/null
+        if ssh "${ssh_args[@]}" "root@${ssh_host}" "bash /tmp/hermes-dl.sh" 2>/dev/null; then
             # Verify size
             local dl_size
-            dl_size=$($ssh_base -p "$ssh_port" "root@${ssh_host}" "stat -c%s ${model_path} 2>/dev/null || echo 0" 2>/dev/null) || dl_size=0
+            dl_size=$(ssh "${ssh_args[@]}" "root@${ssh_host}" "stat -c%s '${model_path}' 2>/dev/null || echo 0" 2>/dev/null) || dl_size=0
             if [[ "$dl_size" -gt 1048576 ]]; then
                 log_info "[download] Success: ${dl_size} bytes"
                 return 0
@@ -309,10 +342,11 @@ retry_model_download() {
 
         # Strategy 2: wget fallback
         log_info "[download] Attempt ${attempt}/${max_attempts}: wget fallback"
-        local wget_cmd="mkdir -p ${model_dir} && cd ${model_dir} && wget -c -O ${model_file} '${model_url}' --timeout=30 --tries=3 --progress=bar:force 2>&1"
-        if $ssh_base -p "$ssh_port" "root@${ssh_host}" "$wget_cmd" 2>/dev/null; then
+        local wget_script="mkdir -p ${model_dir} && cd ${model_dir} && wget -c -O '${model_file}' '${model_url}' --timeout=30 --tries=3 --progress=bar:force"
+        printf '%s\n' "$wget_script" | ssh "${ssh_args[@]}" "root@${ssh_host}" "cat > /tmp/hermes-dl.sh" 2>/dev/null
+        if ssh "${ssh_args[@]}" "root@${ssh_host}" "bash /tmp/hermes-dl.sh" 2>/dev/null; then
             local dl_size
-            dl_size=$($ssh_base -p "$ssh_port" "root@${ssh_host}" "stat -c%s ${model_path} 2>/dev/null || echo 0" 2>/dev/null) || dl_size=0
+            dl_size=$(ssh "${ssh_args[@]}" "root@${ssh_host}" "stat -c%s '${model_path}' 2>/dev/null || echo 0" 2>/dev/null) || dl_size=0
             if [[ "$dl_size" -gt 1048576 ]]; then
                 log_info "[download] Success via wget: ${dl_size} bytes"
                 return 0

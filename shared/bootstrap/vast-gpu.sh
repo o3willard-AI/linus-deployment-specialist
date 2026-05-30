@@ -37,6 +37,7 @@
 #   5 — Model download failed
 #   6 — Server start failed
 #   7 — Health check timeout
+#   8 — Model quality failure (garbage output)
 # =============================================================================
 
 set -euo pipefail
@@ -44,6 +45,20 @@ IFS=$'\n\t'
 
 # Ensure Python subprocess output is unbuffered for background visibility
 export PYTHONUNBUFFERED=1
+
+# -----------------------------------------------------------------------------
+# ERR trap — auto-destroy instance on failure (unless LINUS_KEEP_INSTANCE=true)
+# -----------------------------------------------------------------------------
+_cleanup_on_failure() {
+    local ec=$?
+    if [[ $ec -ne 0 ]] && [[ -n "${CONTRACT_ID:-}" ]] && [[ "${LINUS_KEEP_INSTANCE:-}" != "true" ]]; then
+        log_warn "Bootstrap failed (exit ${ec}). Auto-destroying instance ${CONTRACT_ID}..."
+        echo "y" | /home/sblanken/.local/bin/vastai destroy instance "$CONTRACT_ID" 2>/dev/null || true
+        log_info "Instance ${CONTRACT_ID} destroyed"
+    fi
+    exit $ec
+}
+trap _cleanup_on_failure EXIT
 
 readonly SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -71,6 +86,12 @@ readonly VAST_SERVER_PORT="${VAST_SERVER_PORT:-8080}"
 readonly VAST_CACHE_TYPE_K="${VAST_CACHE_TYPE_K:-q8_0}"
 readonly VAST_CACHE_TYPE_V="${VAST_CACHE_TYPE_V:-q8_0}"
 readonly VAST_FLASH_ATTN="${VAST_FLASH_ATTN:-true}"
+
+# Model fallback chain — comma-separated "repo:file:quant" entries.
+# If the primary model produces garbage output (exit 8), the script
+# tries each fallback in order before giving up.
+# Example: VAST_MODEL_FALLBACKS="unsloth/OtherModel-GGUF:model-f16.gguf:Q4_K_M,bartowski/Backup-GGUF:backup-q4.gguf:Q4_K_M"
+readonly VAST_MODEL_FALLBACKS="${VAST_MODEL_FALLBACKS:-}"
 
 readonly INSTANCE_WORKSPACE="/workspace"
 readonly LLAMA_DIR="${INSTANCE_WORKSPACE}/llama.cpp"
@@ -250,6 +271,16 @@ download_model() {
         return 0
     fi
 
+    # --- HF reachability pre-flight ---
+    # Some Vast hosts have restricted networks that can't reach huggingface.co.
+    # Test before attempting an 18GB download that's doomed to fail.
+    log_info "Checking HuggingFace reachability from instance..."
+    if ! eval "$ssh_cmd \"curl -sI --connect-timeout 15 https://huggingface.co >/dev/null 2>&1\"" 2>/dev/null; then
+        log_error "Instance cannot reach huggingface.co — host network may be restricted"
+        return 5
+    fi
+    log_info "HuggingFace reachable"
+
     # --- Range-request size check (pitfall guard #12) ---
     log_info "Checking model file size via Range request..."
     local content_range
@@ -373,7 +404,8 @@ wait_for_server() {
 # -----------------------------------------------------------------------------
 # Function: verify_inference
 # -----------------------------------------------------------------------------
-# Runs a test inference to confirm the model works.
+# Runs a test inference to confirm the model works AND produces sane output.
+# Quality gates: slash ratio <50%, output not empty, no char >80% repeated.
 # -----------------------------------------------------------------------------
 
 verify_inference() {
@@ -400,28 +432,157 @@ verify_inference() {
             -d "{
                 \"model\": \"${VAST_MODEL_FILE}\",
                 \"messages\": [{\"role\": \"user\", \"content\": \"${prompt}\"}],
-                \"max_tokens\": 20
+                \"max_tokens\": 30
             }" 2>/dev/null) || true
 
         # Check if we got a valid completion
-        if echo "$resp" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['choices'][0]['message']['content'])" >/dev/null 2>&1; then
-            local content
-            content=$(echo "$resp" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['choices'][0]['message']['content'][:100])" 2>/dev/null) || content="(parse error)"
-            log_success "Inference verified (attempt ${attempt}). Response: ${content}"
-            return 0
-        fi
+        local content
+        content=$(echo "$resp" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['choices'][0]['message']['content'])" 2>/dev/null) || true
 
-        # Check for transient errors (503 = model loading, 429 = rate limit)
-        if echo "$resp" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('error',{}).get('code',''))" 2>/dev/null | grep -q "503\|429"; then
-            log_warn "[inference] Model still loading or rate limited — retrying"
+        if [[ -z "$content" ]]; then
+            # Check for transient errors (503 = model loading, 429 = rate limit)
+            if echo "$resp" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('error',{}).get('code',''))" 2>/dev/null | grep -q "503\|429"; then
+                log_warn "[inference] Model still loading or rate limited — retrying"
+                continue
+            fi
+            log_warn "[inference] Attempt ${attempt}: no content. Raw response: ${resp:0:200}"
             continue
         fi
 
-        log_warn "[inference] Attempt ${attempt} failed. Response: ${resp}"
+        # ─── Quality Gates ──────────────────────────────────────────
+        local total_chars=${#content}
+
+        # Gate 1: Slash character ratio (catch Qwen3.6-style / garbage)
+        local slash_count
+        slash_count=$(echo "$content" | tr -cd '/' | wc -c)
+        local slash_ratio=$(( slash_count * 100 / total_chars ))
+        if [[ $slash_ratio -gt 50 ]]; then
+            log_error "[quality] Model producing garbage: ${slash_ratio}% slash characters (threshold: 50%)"
+            log_error "[quality] Content sample: ${content:0:200}"
+            return 8
+        fi
+
+        # Gate 2: Single-character dominance (catch repeated-char nonsense)
+        local max_char_pct
+        max_char_pct=$(echo "$content" | fold -w1 | sort | uniq -c | sort -rn | head -1 | awk '{print $1}')
+        max_char_pct=$(( max_char_pct * 100 / total_chars ))
+        if [[ $max_char_pct -gt 80 ]]; then
+            log_error "[quality] Single character dominates ${max_char_pct}% of output (threshold: 80%)"
+            log_error "[quality] Content sample: ${content:0:200}"
+            return 8
+        fi
+
+        # Gate 3: Empty or whitespace-only output
+        if [[ -z "${content//[[:space:]]/}" ]]; then
+            log_error "[quality] Model produced whitespace-only output"
+            return 8
+        fi
+        # ─── End Quality Gates ──────────────────────────────────────
+
+        log_success "Inference verified (attempt ${attempt}). Response: ${content:0:100}"
+        return 0
     done
 
     log_error "Inference verification failed after 3 attempts"
     return 6
+}
+
+# -----------------------------------------------------------------------------
+# Function: _try_model
+# -----------------------------------------------------------------------------
+# Internal: downloads, serves, and verifies a single model.
+# Args: repo file quant — all optional (defaults to VAST_MODEL_* vars)
+# Returns: 0 on success, non-zero on failure
+# -----------------------------------------------------------------------------
+
+_try_model() {
+    local repo="${1:-$VAST_MODEL_REPO}"
+    local file="${2:-$VAST_MODEL_FILE}"
+    local quant="${3:-${VAST_MODEL_QUANT:-}}"
+    local label="${4:-$file}"
+
+    # Override derived paths for this attempt
+    local try_model_url="https://huggingface.co/${repo}/resolve/main/${file}"
+    local try_model_path="${MODEL_DIR}/${file}"
+    local try_chat_url="http://${SSH_HOST}:${PROXY_PORT}/v1/chat/completions"
+
+    log_info "Trying model: ${label}"
+
+    # Download with alternate model
+    local ssh_key
+    ssh_key=$(_ssh_key)
+    if ! retry_model_download "$SSH_HOST" "$SSH_PORT" "$ssh_key" "$try_model_url" "$try_model_path" 5; then
+        log_error "Failed to download ${label}"
+        return 5
+    fi
+
+    # Start server with this model
+    local ssh_cmd
+    ssh_cmd="ssh $(_ssh_args) -p ${SSH_PORT} root@${SSH_HOST}"
+
+    # Kill any existing server
+    eval "$ssh_cmd \"pkill -f llama-server 2>/dev/null\"" 2>/dev/null || true
+    sleep 2
+
+    log_info "Starting server with ${label}..."
+    local start_cmd="nohup ${LLAMA_SERVER_BIN} \
+        -m ${try_model_path} \
+        --host 0.0.0.0 \
+        --port ${VAST_SERVER_PORT} \
+        --n-gpu-layers all \
+        --ctx-size ${VAST_CTX_SIZE} \
+        --api-key ${VAST_API_KEY} \
+        > ${LLAMA_SERVER_LOG} 2>&1 &"
+    eval "$ssh_cmd \"$start_cmd\"" 2>/dev/null || { log_error "Failed to start server with ${label}"; return 6; }
+
+    # Wait for health
+    if ! retry_health_check "$HEALTH_URL" 24 5; then
+        log_error "Server not healthy with ${label}"
+        return 7
+    fi
+    log_success "Server healthy with ${label}"
+
+    # Run quality-gated inference
+    # Use the try-specific URL
+    local prompt="Hello, this is a Linus deployment test. Please respond with OK."
+    local resp
+    resp=$(curl -s --max-time 30 "$try_chat_url" \
+        -H "Authorization: Bearer ${VAST_API_KEY}" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"model\": \"${file}\",
+            \"messages\": [{\"role\": \"user\", \"content\": \"${prompt}\"}],
+            \"max_tokens\": 30
+        }" 2>/dev/null) || true
+
+    local content
+    content=$(echo "$resp" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['choices'][0]['message']['content'])" 2>/dev/null) || true
+
+    if [[ -z "$content" ]]; then
+        log_error "No output from ${label}"
+        return 8
+    fi
+
+    # Quality gates (same as verify_inference)
+    local total_chars=${#content}
+    local slash_count
+    slash_count=$(echo "$content" | tr -cd '/' | wc -c)
+    local slash_ratio=$(( slash_count * 100 / total_chars ))
+    if [[ $slash_ratio -gt 50 ]]; then
+        log_error "[quality] ${label} producing garbage: ${slash_ratio}% slashes"
+        return 8
+    fi
+
+    local max_char_pct
+    max_char_pct=$(echo "$content" | fold -w1 | sort | uniq -c | sort -rn | head -1 | awk '{print $1}')
+    max_char_pct=$(( max_char_pct * 100 / total_chars ))
+    if [[ $max_char_pct -gt 80 ]]; then
+        log_error "[quality] ${label}: single char dominates ${max_char_pct}%"
+        return 8
+    fi
+
+    log_success "Model ${label} verified: ${content:0:100}"
+    return 0
 }
 
 # -----------------------------------------------------------------------------
@@ -452,14 +613,41 @@ main() {
 
     validate_environment || exit $?
     verify_build || exit $?
+
+    # Try primary model
     download_model || exit $?
     start_server || exit $?
     wait_for_server || exit $?
-    verify_inference || exit $?
-    output_result
+    verify_inference
+    local verify_ec=$?
 
-    log_success "GPU bootstrap completed successfully"
-    return 0
+    # If primary model passes quality, we're done
+    if [[ $verify_ec -eq 0 ]]; then
+        output_result
+        log_success "GPU bootstrap completed successfully"
+        return 0
+    fi
+
+    # Quality failure (exit 8) — try fallbacks
+    if [[ $verify_ec -eq 8 ]] && [[ -n "$VAST_MODEL_FALLBACKS" ]]; then
+        log_warn "Primary model failed quality check. Trying fallbacks..."
+        IFS=',' read -ra FALLBACKS <<< "$VAST_MODEL_FALLBACKS"
+        for fb in "${FALLBACKS[@]}"; do
+            IFS=':' read -r fb_repo fb_file fb_quant <<< "$fb"
+            log_info "Fallback: ${fb_repo}/${fb_file}"
+            if _try_model "$fb_repo" "$fb_file" "${fb_quant:-}" "${fb_file}"; then
+                output_result
+                log_success "GPU bootstrap completed with fallback model"
+                return 0
+            fi
+            log_warn "Fallback ${fb_file} failed — trying next..."
+        done
+        log_error "All models exhausted (primary + ${#FALLBACKS[@]} fallbacks)"
+        exit 8
+    fi
+
+    # Non-quality failure — propagate
+    exit $verify_ec
 }
 
 # Only run main if script is executed (not sourced)
