@@ -618,8 +618,10 @@ main() {
     download_model || exit $?
     start_server || exit $?
     wait_for_server || exit $?
-    verify_inference
-    local verify_ec=$?
+
+    # Capture verify_inference exit code without triggering set -e
+    local verify_ec=0
+    verify_inference || verify_ec=$?
 
     # If primary model passes quality, we're done
     if [[ $verify_ec -eq 0 ]]; then
