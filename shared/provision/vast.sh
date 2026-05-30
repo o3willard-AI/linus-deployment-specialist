@@ -46,6 +46,8 @@ source_lib "logging.sh" "validation.sh" "retry.sh"
 # vast-sizing.sh must be sourced directly — its declare -A arrays
 # don't survive source_lib's subshell-based directory walk
 source "$SCRIPT_DIR/../lib/vast-sizing.sh"
+# Quality gate helpers (LLM eval for offer selection, build watch, run strategy)
+source "$SCRIPT_DIR/../lib/quality-gate.sh"
 
 # -----------------------------------------------------------------------------
 # Configuration from environment with defaults
@@ -72,6 +74,7 @@ ALLOCATED_SSH_HOST=""
 ALLOCATED_SSH_PORT=""
 ALLOCATED_PROXY_PORT=""
 CALCULATED_DISK_GB=""
+ALLOCATED_INSTANCE_PRICE=""  # P1.4: Cost tracking — populated from offer JSON
 
 # -----------------------------------------------------------------------------
 # Credential auto-discovery (matches proxmox.sh pattern)
@@ -293,8 +296,75 @@ json.dump(filtered, sys.stdout)
         log_info "After host exclusion: $(echo "$filtered_json" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null) offers remain"
     fi
 
-    local offer_id
-    offer_id=$(echo "$search_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['id'])" 2>/dev/null) || true
+    # TP1 / P2.7: Smart offer selection with non-deterministic evaluation
+    # Instead of blindly taking offers[0], evaluate top 5 candidates and
+    # prefer diversity when retrying (different machine_ids, regions).
+    local offer_id instance_price
+    local offer_count
+    offer_count=$(echo "$search_output" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null) || offer_count=0
+
+    if [[ "$offer_count" -le 1 ]]; then
+        # Only one offer — take it
+        offer_id=$(echo "$search_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['id'])" 2>/dev/null) || true
+        instance_price=$(echo "$search_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('dph_total','0'))" 2>/dev/null) || true
+    else
+        # P2.7: On retry attempts, prefer diversity — group by machine_id,
+        # pick from a different group than previous failures
+        # TP1: Use LLM to evaluate top 5 and pick the best one
+        local llm_eval="${SCRIPT_DIR}/../lib/llm-eval.py"
+        if [[ -f "$llm_eval" && "$offer_count" -ge 2 ]]; then
+            # Build offer summary for LLM evaluation
+            local offer_summary
+            offer_summary=$(echo "$search_output" | python3 -c "
+import json, sys
+offers = json.load(sys.stdin)
+for i, o in enumerate(offers[:5], 1):
+    gpu = o.get('gpu_name','?')
+    price = o.get('dph_total', 0)
+    rel = o.get('reliability2', o.get('reliability', 0))
+    disk = o.get('disk_space', 0)
+    mid = o.get('host_id', '?')
+    loc = o.get('geolocation', '?')
+    dlp = o.get('dlperf', 0)
+    oid = o.get('id', '?')
+    print(f'{i}. \${price:.2f}/hr | {rel*100:.1f}% rel | {loc} | machine_{mid} | {disk}GB disk | dlperf {dlp} | offer_id={oid}')
+" 2>/dev/null) || true
+
+            if [[ -n "$offer_summary" ]]; then
+                log_info "Evaluating top ${offer_count} offers via LLM..."
+                log_info "Offers:\n${offer_summary}"
+                local selected_idx
+                selected_idx=$(echo "$offer_summary" | python3 "$llm_eval" offer-select 2>/dev/null) || true
+                # Extract the selected offer
+                if [[ "$selected_idx" =~ ^[1-5]$ ]]; then
+                    local selected_json_idx=$((selected_idx - 1))
+                    offer_id=$(echo "$search_output" | python3 -c "
+import json, sys
+offers = json.load(sys.stdin)
+print(offers[${selected_json_idx}]['id'])
+" 2>/dev/null) || true
+                    instance_price=$(echo "$search_output" | python3 -c "
+import json, sys
+offers = json.load(sys.stdin)
+print(offers[${selected_json_idx}].get('dph_total','0'))
+" 2>/dev/null) || true
+                    log_info "[llm-eval] Selected offer #${selected_idx} (${offer_id})"
+                else
+                    log_warn "[llm-eval] Unexpected response '${selected_idx}' — falling back to offer #1"
+                    offer_id=$(echo "$search_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['id'])" 2>/dev/null) || true
+                    instance_price=$(echo "$search_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('dph_total','0'))" 2>/dev/null) || true
+                fi
+            else
+                # Fallback: take first offer
+                offer_id=$(echo "$search_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['id'])" 2>/dev/null) || true
+                instance_price=$(echo "$search_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('dph_total','0'))" 2>/dev/null) || true
+            fi
+        else
+            # No LLM eval available — take first offer
+            offer_id=$(echo "$search_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['id'])" 2>/dev/null) || true
+            instance_price=$(echo "$search_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('dph_total','0'))" 2>/dev/null) || true
+        fi
+    fi
 
     if [[ -z "$offer_id" ]]; then
         log_error "Failed to parse offer ID from search results"
@@ -302,7 +372,8 @@ json.dump(filtered, sys.stdout)
     fi
 
     ALLOCATED_OFFER_ID="$offer_id"
-    log_success "Selected offer: $offer_id"
+    ALLOCATED_INSTANCE_PRICE="$instance_price"
+    log_success "Selected offer: $offer_id @ \$${instance_price}/hr"
     return 0
 }
 
@@ -407,6 +478,11 @@ wait_for_running() {
                     ALLOCATED_PROXY_PORT="$((ssh_port + 1))"
                 fi
 
+                # P2.8: SSH rate-limit cooldown — Vast proxy needs 3s between connections.
+                # Without this, the bootstrap's first SSH call triggers rate-limiting if
+                # it fires within the same window as the probe.
+                sleep 3
+
                 log_success "Instance running + SSH verified (${elapsed}s)"
                 return 0
                 ;;
@@ -506,7 +582,8 @@ output_result() {
         "PROXY_PORT:${ALLOCATED_PROXY_PORT}" \
         "GPU:${VAST_GPU_NAME}" \
         "CUDA_ARCH:${VAST_CUDA_ARCH}" \
-        "IMAGE:${VAST_IMAGE}"
+        "IMAGE:${VAST_IMAGE}" \
+        "INSTANCE_PRICE:${ALLOCATED_INSTANCE_PRICE:-0}"
 }
 
 # -----------------------------------------------------------------------------
@@ -609,6 +686,42 @@ main() {
     if [[ -z "${ALLOCATED_CONTRACT_ID:-}" ]]; then
         log_error "Failed to provision a working instance after ${max_hosts} host attempts"
         log_error "Excluded hosts: ${LINUS_EXCLUDED_HOSTS}"
+
+        # TP4: Non-deterministic run outcome strategist
+        # After all hosts fail, ask the LLM: retry with adjusted strategy or abort?
+        local llm_eval="${SCRIPT_DIR}/../lib/llm-eval.py"
+        if [[ -f "$llm_eval" ]]; then
+            local strategy_summary
+            strategy_summary=$(cat <<EOF
+Run failed after ${max_hosts} attempts with ${VAST_GPU_NAME}.
+Attempts exhausted. Excluded hosts: ${LINUS_EXCLUDED_HOSTS}.
+GPU: ${VAST_GPU_NAME}, CUDA arch: ${VAST_CUDA_ARCH}, min reliability: ${VAST_MIN_RELIABILITY}.
+Next action?
+EOF
+)
+            local strategy
+            strategy=$(echo "$strategy_summary" | python3 "$llm_eval" run-strategist 2>/dev/null) || true
+            log_info "[llm-eval] Run strategist recommendation: ${strategy:-no_response}"
+
+            case "$strategy" in
+                RETRY:switch_gpu)
+                    log_warn "Strategist recommends switching GPU tier. If RTX 3090 exhausted, try RTX 4090."
+                    ;;
+                RETRY:different_region)
+                    log_warn "Strategist recommends trying a different region."
+                    ;;
+                RETRY:increase_disk)
+                    log_warn "Strategist recommends increasing disk allocation."
+                    ;;
+                RETRY:same)
+                    log_warn "Strategist recommends retrying with same parameters."
+                    ;;
+                *)
+                    log_warn "Strategist has no viable path — aborting."
+                    ;;
+            esac
+        fi
+
         exit 5
     fi
 

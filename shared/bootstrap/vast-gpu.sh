@@ -69,6 +69,8 @@ source_lib "logging.sh" "validation.sh" "retry.sh"
 # vast-sizing.sh must be sourced directly — its declare -A arrays
 # don't survive source_lib's subshell-based directory walk
 source "$SCRIPT_DIR/../lib/vast-sizing.sh"
+# Quality gate helpers (Content-Range parsing, 5-gram detection, LLM eval)
+source "$SCRIPT_DIR/../lib/quality-gate.sh"
 
 # -----------------------------------------------------------------------------
 # Configuration from environment with defaults
@@ -99,6 +101,10 @@ readonly MODEL_DIR="${LLAMA_DIR}/models"
 readonly LLAMA_SERVER_BIN="${LLAMA_DIR}/build/bin/llama-server"
 readonly LLAMA_SERVER_LOG="/var/log/llama-server.log"
 readonly MODEL_PATH="${MODEL_DIR}/${VAST_MODEL_FILE}"
+
+# P1.4: Cost tracking
+LINUS_START_TIME=$(date +%s)
+LINUS_INSTANCE_PRICE="${LINUS_INSTANCE_PRICE:-}"  # Populated by driver script or vast.sh output
 
 # Derived URLs
 readonly MODEL_URL="https://huggingface.co/${VAST_MODEL_REPO}/resolve/main/${VAST_MODEL_FILE}"
@@ -205,6 +211,7 @@ verify_build() {
         local waited=0
         local max_build_wait=900  # 15 minutes (3090 hosts can be slow)
         local poll_interval=15
+        local llm_check_interval=120  # Run LLM build watch every 2 minutes (TP2)
 
         while [[ $waited -lt $max_build_wait ]]; do
             sleep "$poll_interval"
@@ -218,6 +225,25 @@ verify_build() {
             # Check if build is still running
             local build_active
             build_active=$(eval "$ssh_cmd \"pgrep -f 'cmake|make|cc1plus|nvcc' >/dev/null 2>&1 && echo BUILDING || echo IDLE\"" 2>/dev/null) || true
+
+            # P2.6: Fatal pattern detection — check onstart.log for errors
+            local onstart_tail
+            onstart_tail=$(eval "$ssh_cmd \"tail -30 /var/log/onstart.log 2>/dev/null || echo NO_LOG\"" 2>/dev/null) || true
+            if [[ "$onstart_tail" != "NO_LOG" ]]; then
+                if ! _linus_check_fatal_build_errors "$onstart_tail"; then
+                    # TP2: Non-deterministic LLM build watch — confirm abort decision
+                    if [[ $(( waited % llm_check_interval )) -lt $poll_interval || $waited -ge 300 ]]; then
+                        local llm_decision
+                        llm_decision=$(_linus_llm_build_watch "$waited" "$build_active" "$onstart_tail")
+                        log_info "[llm-eval] Build watch (${waited}s): ${llm_decision}"
+                        if [[ "$llm_decision" == ABORT:* ]]; then
+                            log_error "Build watch LLM recommends abort: ${llm_decision#ABORT:}"
+                            log_error "Last build output:\n${onstart_tail}"
+                            return 4
+                        fi
+                    fi
+                fi
+            fi
 
             log_info "Waiting... (${waited}s/${max_build_wait}s, build=${build_active:-UNKNOWN})"
         done
@@ -281,16 +307,14 @@ download_model() {
     fi
     log_info "HuggingFace reachable"
 
-    # --- Range-request size check (pitfall guard #12) ---
+    # --- Range-request size check (P0.1 fix — robust Python parsing) ---
     log_info "Checking model file size via Range request..."
-    local content_range
-    content_range=$(curl -sI -H "Range: bytes=0-0" "$MODEL_URL" 2>/dev/null | grep -i "content-range" | tr -d '\r') || true
+    local total_bytes
+    total_bytes=$(_linus_get_model_size_bytes "$MODEL_URL") || total_bytes=0
 
-    local total_bytes=0
-    if [[ -n "$content_range" ]]; then
-        total_bytes=$(echo "$content_range" | grep -oP '/\K[0-9]+')
+    if [[ "$total_bytes" -gt 0 ]]; then
         local total_gb
-        total_gb=$(bc <<< "scale=2; ${total_bytes} / 1073741824" 2>/dev/null || echo "?")
+        total_gb=$(python3 -c "print(round(${total_bytes} / 1073741824, 2))" 2>/dev/null || echo "?")
         log_info "Model size: ${total_gb} GB (${total_bytes} bytes)"
     else
         log_warn "Could not determine model size via Range request — proceeding anyway"
@@ -298,17 +322,8 @@ download_model() {
 
     # --- Check disk space (only if we got a real size) ---
     if [[ "$total_bytes" -gt 0 ]]; then
-        local disk_free
-        # Use single quotes for awk to prevent bash $4 expansion under set -u
-        disk_free=$(eval "$ssh_cmd \"df -BG ${INSTANCE_WORKSPACE} 2>/dev/null | tail -1 | awk '{print \$4}' | tr -d 'G'\"" 2>/dev/null) || disk_free=0
-        if [[ "$disk_free" -gt 0 ]]; then
-            local needed_gb
-            needed_gb=$(bc <<< "scale=0; (${total_bytes} * 1.2) / 1073741824" 2>/dev/null || echo "0")
-            if [[ "$disk_free" -lt "$needed_gb" ]]; then
-                log_error "Insufficient disk space: ${disk_free}GB free, need ~${needed_gb}GB"
-                return 5
-            fi
-            log_info "Disk space OK: ${disk_free}GB free, need ~${needed_gb}GB"
+        if ! _linus_check_disk_space "$ssh_cmd" "$INSTANCE_WORKSPACE" "$total_bytes"; then
+            return 5
         fi
     else
         log_warn "Could not determine model size — skipping disk space check"
@@ -450,31 +465,14 @@ verify_inference() {
         fi
 
         # ─── Quality Gates ──────────────────────────────────────────
-        local total_chars=${#content}
-
-        # Gate 1: Slash character ratio (catch Qwen3.6-style / garbage)
-        local slash_count
-        slash_count=$(echo "$content" | tr -cd '/' | wc -c)
-        local slash_ratio=$(( slash_count * 100 / total_chars ))
-        if [[ $slash_ratio -gt 50 ]]; then
-            log_error "[quality] Model producing garbage: ${slash_ratio}% slash characters (threshold: 50%)"
-            log_error "[quality] Content sample: ${content:0:200}"
+        # P0.2: Now includes 5-gram semantic degeneration detection
+        # TP3: Non-deterministic LLM quality judge for borderline cases
+        if ! _linus_run_quality_gates "$content"; then
             return 8
         fi
 
-        # Gate 2: Single-character dominance (catch repeated-char nonsense)
-        local max_char_pct
-        max_char_pct=$(echo "$content" | fold -w1 | sort | uniq -c | sort -rn | head -1 | awk '{print $1}')
-        max_char_pct=$(( max_char_pct * 100 / total_chars ))
-        if [[ $max_char_pct -gt 80 ]]; then
-            log_error "[quality] Single character dominates ${max_char_pct}% of output (threshold: 80%)"
-            log_error "[quality] Content sample: ${content:0:200}"
-            return 8
-        fi
-
-        # Gate 3: Empty or whitespace-only output
-        if [[ -z "${content//[[:space:]]/}" ]]; then
-            log_error "[quality] Model produced whitespace-only output"
+        # TP3: Non-deterministic LLM quality judge (catches subtle issues)
+        if ! _linus_llm_quality_judge "$content"; then
             return 8
         fi
         # ─── End Quality Gates ──────────────────────────────────────
@@ -507,6 +505,23 @@ _try_model() {
     local try_chat_url="http://${SSH_HOST}:${PROXY_PORT}/v1/chat/completions"
 
     log_info "Trying model: ${label}"
+
+    # P1.5: Content-Range size check for fallback models (same as download_model)
+    log_info "Checking fallback model size..."
+    local try_bytes
+    try_bytes=$(_linus_get_model_size_bytes "$try_model_url") || try_bytes=0
+    if [[ "$try_bytes" -gt 0 ]]; then
+        local try_gb
+        try_gb=$(python3 -c "print(round(${try_bytes} / 1073741824, 2))" 2>/dev/null || echo "?")
+        log_info "Fallback model size: ${try_gb} GB"
+
+        # Check disk space
+        local ssh_cmd
+        ssh_cmd="ssh $(_ssh_args) -p ${SSH_PORT} root@${SSH_HOST}"
+        if ! _linus_check_disk_space "$ssh_cmd" "$INSTANCE_WORKSPACE" "$try_bytes"; then
+            return 5
+        fi
+    fi
 
     # Download with alternate model
     local ssh_key
@@ -563,21 +578,14 @@ _try_model() {
         return 8
     fi
 
-    # Quality gates (same as verify_inference)
-    local total_chars=${#content}
-    local slash_count
-    slash_count=$(echo "$content" | tr -cd '/' | wc -c)
-    local slash_ratio=$(( slash_count * 100 / total_chars ))
-    if [[ $slash_ratio -gt 50 ]]; then
-        log_error "[quality] ${label} producing garbage: ${slash_ratio}% slashes"
+    # Quality gates (P0.2: now unified with _linus_run_quality_gates + TP3 LLM judge)
+    if ! _linus_run_quality_gates "$content"; then
+        log_error "[quality] ${label}: failed deterministic quality gates"
         return 8
     fi
 
-    local max_char_pct
-    max_char_pct=$(echo "$content" | fold -w1 | sort | uniq -c | sort -rn | head -1 | awk '{print $1}')
-    max_char_pct=$(( max_char_pct * 100 / total_chars ))
-    if [[ $max_char_pct -gt 80 ]]; then
-        log_error "[quality] ${label}: single char dominates ${max_char_pct}%"
+    if ! _linus_llm_quality_judge "$content"; then
+        log_error "[quality] ${label}: failed LLM quality judge"
         return 8
     fi
 
@@ -592,6 +600,21 @@ _try_model() {
 output_result() {
     log_step "7" "Generating output"
 
+    # P1.4: Compute cost summary
+    local end_time wall_time
+    end_time=$(date +%s)
+    wall_time=$(( end_time - LINUS_START_TIME ))
+
+    local cost_summary=""
+    if [[ -n "${LINUS_INSTANCE_PRICE:-}" && "$LINUS_INSTANCE_PRICE" != "0" ]]; then
+        local total_cost
+        total_cost=$(python3 -c "print(round(${LINUS_INSTANCE_PRICE} * ${wall_time} / 3600, 4))" 2>/dev/null) || total_cost="?"
+        cost_summary="LINUS_COST:total_usd=${total_cost},instance_price=${LINUS_INSTANCE_PRICE},wall_time_s=${wall_time}"
+        log_info "Cost: \$${total_cost} (${wall_time}s @ \$${LINUS_INSTANCE_PRICE}/hr)"
+    else
+        cost_summary="LINUS_COST:wall_time_s=${wall_time}"
+    fi
+
     linus_success \
         "API_URL:${CHAT_URL}" \
         "HEALTH_URL:${HEALTH_URL}" \
@@ -601,7 +624,8 @@ output_result() {
         "SSH_HOST:${SSH_HOST}" \
         "SSH_PORT:${SSH_PORT}" \
         "PROXY_PORT:${PROXY_PORT}" \
-        "CONTRACT_ID:${CONTRACT_ID}"
+        "CONTRACT_ID:${CONTRACT_ID}" \
+        "${cost_summary}"
 }
 
 # -----------------------------------------------------------------------------
