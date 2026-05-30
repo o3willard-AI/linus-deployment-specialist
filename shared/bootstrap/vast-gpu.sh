@@ -609,10 +609,10 @@ output_result() {
     if [[ -n "${LINUS_INSTANCE_PRICE:-}" && "$LINUS_INSTANCE_PRICE" != "0" ]]; then
         local total_cost
         total_cost=$(python3 -c "print(round(${LINUS_INSTANCE_PRICE} * ${wall_time} / 3600, 4))" 2>/dev/null) || total_cost="?"
-        cost_summary="LINUS_COST:total_usd=${total_cost},instance_price=${LINUS_INSTANCE_PRICE},wall_time_s=${wall_time}"
+        cost_summary="COST:total_usd=${total_cost},instance_price=${LINUS_INSTANCE_PRICE},wall_time_s=${wall_time}"
         log_info "Cost: \$${total_cost} (${wall_time}s @ \$${LINUS_INSTANCE_PRICE}/hr)"
     else
-        cost_summary="LINUS_COST:wall_time_s=${wall_time}"
+        cost_summary="COST:wall_time_s=${wall_time}"
     fi
 
     linus_success \

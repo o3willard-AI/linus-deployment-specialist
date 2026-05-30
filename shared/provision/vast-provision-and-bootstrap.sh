@@ -194,7 +194,13 @@ print_summary() {
     local end_time wall_time total_seconds
     end_time=$(date +%s)
     total_seconds=$(( end_time - PIPELINE_START_TIME ))
-    wall_time=$(python3 -c "print(f'{${total_seconds}//3600}h {(${total_seconds}%3600)//60}m ${${total_seconds}%60}s')" 2>/dev/null || echo "${total_seconds}s")
+    wall_time=$(python3 -c "
+total = ${total_seconds}
+h = total // 3600
+m = (total % 3600) // 60
+s = total % 60
+print(f'{h}h {m}m {s}s')
+" 2>/dev/null || echo "${total_seconds}s")
 
     log_header "Pipeline Summary"
     log_info "  Wall time:     ${wall_time}"
