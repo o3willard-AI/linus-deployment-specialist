@@ -203,7 +203,7 @@ verify_build() {
         log_info "llama-server not found yet — build may still be in progress. Waiting..."
 
         local waited=0
-        local max_build_wait=600  # 10 minutes
+        local max_build_wait=900  # 15 minutes (3090 hosts can be slow)
         local poll_interval=15
 
         while [[ $waited -lt $max_build_wait ]]; do
