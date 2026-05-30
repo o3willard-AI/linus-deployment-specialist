@@ -1,14 +1,9 @@
 #!/usr/bin/env bash
-# Kiosk Challenge Runner — sends the Kiosk Admin Panel spec to a running
-# llama.cpp server on a Vast GPU instance and captures the output.
+# Kiosk Challenge Runner (Chat API) — sends the Kiosk Admin Panel spec
+# to a running llama.cpp server and captures output.
 #
 # Usage: API_KEY=mykey bash send-kiosk-challenge.sh <ip> <port> [output_dir]
-# Example: API_KEY=linus-inference bash send-kiosk-challenge.sh ssh4.vast.ai 17667 /tmp/kiosk-test
-#
-# Resiliency improvements:
-#   - API_KEY env var support (required for auth-protected servers)
-#   - Pre-flight quality canary (small prompt → check output sanity)
-#   - Unbuffered Python for real-time progress visibility
+# Example: API_KEY=linus-inference bash send-kiosk-challenge.sh ssh4.vast.ai 17667
 
 set -euo pipefail
 
@@ -17,168 +12,185 @@ PORT="${2:?Usage: $0 <ip> <port> [output_dir]}"
 OUTDIR="${3:-/tmp/kiosk-test-$(date +%Y%m%d-%H%M%S)}"
 API_KEY="${API_KEY:-}"
 
-SPEC_FILE="$(dirname "$0")/challenge-prompt.txt"
-ENDPOINT="http://${IP}:${PORT}/v1/completions"
+SPEC_FILE="$(dirname "$0")/challenge-prompt-chat.json"
+ENDPOINT="http://${IP}:${PORT}/v1/chat/completions"
 
 mkdir -p "$OUTDIR"
-
-# Divert stdout to both terminal and a log file for background visibility
 exec > >(tee "$OUTDIR/run.log") 2>&1
 
-echo "=== Kiosk Challenge Runner ==="
+echo "=== Kiosk Challenge Runner (Chat API) ==="
 echo "Target: $ENDPOINT"
 echo "Output: $OUTDIR"
 echo ""
 
-# ---- Auth header ----
-AUTH_HEADER=""
+# ---- Auth ----
 if [[ -n "$API_KEY" ]]; then
-    AUTH_HEADER="-H \"Authorization: Bearer $API_KEY\""
     echo "Auth: Bearer *** (set)"
 else
     echo "Auth: none (API_KEY not set)"
 fi
 echo ""
 
-# ---- Pre-flight: Quality canary ----
-# Sends a small prompt first to verify the model produces sane output
-# before committing to a 30-minute challenge on a broken model.
+# ---- Pre-flight: Quality canary (chat format) ----
 echo "=== Quality Canary ==="
-echo "Testing model with small prompt (200 tokens max)..."
-CANARY_RESPONSE=$(eval curl -s --max-time 120 "$ENDPOINT" \
-    $AUTH_HEADER \
+echo "Testing model with small prompt (50 tokens max)..."
+CANARY_RESPONSE=$(curl -s --max-time 60 "$ENDPOINT" \
+    -H "Authorization: Bearer ${API_KEY}" \
     -H "Content-Type: application/json" \
-    -d '{"prompt":"Write a Python function that reverses a string. Output ONLY code, no explanation.","max_tokens":200,"temperature":0.3}' 2>&1) || {
+    -d '{
+        "messages": [
+            {"role": "system", "content": "Respond with ONLY the answer. No explanation."},
+            {"role": "user", "content": "What is 2+2?"}
+        ],
+        "max_tokens": 50,
+        "temperature": 0.0
+    }' 2>&1) || {
     echo "FAILED: Canary request failed"
     echo "$CANARY_RESPONSE"
     exit 1
 }
 
-CANARY_TEXT=$(echo "$CANARY_RESPONSE" | python3 -c "
+CANARY_CONTENT=$(echo "$CANARY_RESPONSE" | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
-c = d.get('choices', [{}])[0].get('text', '')
-print(c)
-" 2>/dev/null) || CANARY_TEXT=""
+print(d['choices'][0]['message']['content'])
+" 2>/dev/null) || CANARY_CONTENT=""
 
-CANARY_CHARS=$(echo -n "$CANARY_TEXT" | wc -c)
+CANARY_CHARS=$(echo -n "$CANARY_CONTENT" | wc -c)
 
-# Heuristic: garbage output = lots of newlines or repeated single chars
-NEWLINE_RATIO=$(echo "$CANARY_TEXT" | tr -cd '\n' | wc -c)
+# Quality: slash ratio
+SLASH_COUNT=$(echo "$CANARY_CONTENT" | tr -cd '/' | wc -c)
 if [[ $CANARY_CHARS -gt 0 ]]; then
-    NEWLINE_PCT=$((NEWLINE_RATIO * 100 / CANARY_CHARS))
+    SLASH_PCT=$((SLASH_COUNT * 100 / CANARY_CHARS))
 else
-    NEWLINE_PCT=0
+    SLASH_PCT=0
 fi
 
-# Check for repeated-character garbage (e.g., "ssssssss")
-REPEAT_SCORE=$(echo "$CANARY_TEXT" | python3 -c "
+# Quality: char dominance
+REPEAT_PCT=$(echo "$CANARY_CONTENT" | python3 -c "
 import sys
+from collections import Counter
 text = sys.stdin.read()
-if len(text) < 10:
-    print(0)
+if len(text) < 5: print(0)
 else:
-    from collections import Counter
     c = Counter(text)
-    # If any single char is >50% of output, likely garbage
-    top_pct = max(c.values()) / len(text) * 100 if text else 0
-    print(int(top_pct))
-" 2>/dev/null) || REPEAT_SCORE=0
+    print(int(max(c.values()) / len(text) * 100))
+" 2>/dev/null) || REPEAT_PCT=0
 
-echo "Canary: ${CANARY_CHARS} chars, ${NEWLINE_PCT}% newlines, ${REPEAT_SCORE}% repeated char"
-CANARY_FIRST=$(echo "$CANARY_TEXT" | head -c 200)
-echo "Preview: ${CANARY_FIRST}"
+echo "Canary: ${CANARY_CHARS} chars, ${SLASH_PCT}% slashes, ${REPEAT_PCT}% repeated"
+echo "Preview: ${CANARY_CONTENT:0:200}"
 
-if [[ $NEWLINE_PCT -gt 40 ]]; then
-    echo "⚠️  CANARY FAILED: >40% newlines — model output likely garbage"
-    echo "   Skipping full challenge. Try a larger model or different quant."
-    echo "FAILED:garbage" > "$OUTDIR/manifest.json"
+if [[ $SLASH_PCT -gt 50 ]]; then
+    echo "CANARY FAILED: >50% slash characters — model output is garbage"
     exit 1
 fi
-
-if [[ $REPEAT_SCORE -gt 50 ]]; then
-    echo "⚠️  CANARY FAILED: single character repeated >50% — model output is garbage"
-    echo "   Skipping full challenge."
-    echo "FAILED:repeated_char" > "$OUTDIR/manifest.json"
+if [[ $REPEAT_PCT -gt 50 ]]; then
+    echo "CANARY FAILED: single character >50% — model output is garbage"
     exit 1
 fi
-
-echo "Canary PASSED ✓"
+echo "Canary PASSED"
 echo ""
 
 # ---- Send the challenge ----
-echo "Sending Kiosk Admin Panel challenge..."
+echo "Sending Kiosk Admin Panel challenge (chat format)..."
 echo "Spec size: $(wc -c < "$SPEC_FILE") chars"
+echo ""
 
 START_TIME=$(date +%s)
 
-RESPONSE=$(eval curl -s --max-time 1800 "$ENDPOINT" \
-    $AUTH_HEADER \
+RESPONSE=$(curl -s --max-time 1800 "$ENDPOINT" \
+    -H "Authorization: Bearer ${API_KEY}" \
     -H "Content-Type: application/json" \
     -d @"$SPEC_FILE" 2>&1) || {
-    echo "Curl failed or timed out after 30 min"
-    echo "$RESPONSE"
+    echo "Curl failed or timed out"
     exit 1
 }
 
 END_TIME=$(date +%s)
 ELAPSED=$((END_TIME - START_TIME))
 
-# ---- Save raw response ----
 echo "$RESPONSE" > "$OUTDIR/raw-response.json"
 
 # ---- Extract content ----
 CONTENT=$(echo "$RESPONSE" | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
-c = d.get('choices', [{}])[0].get('text', '')
-print(c)
+print(d['choices'][0]['message']['content'])
 " 2>/dev/null) || CONTENT=""
+
+USAGE=$(echo "$RESPONSE" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+u = d.get('usage', {})
+print(f\"{u.get('completion_tokens',0)}/{u.get('prompt_tokens',0)}/{u.get('total_tokens',0)}\")
+" 2>/dev/null) || USAGE="?/?/?"
 
 echo "$CONTENT" > "$OUTDIR/model-output.txt"
 
-# ---- Metrics ----
 CONTENT_CHARS=$(wc -c < "$OUTDIR/model-output.txt")
-CONTENT_LINES=$(wc -l < "$OUTDIR/model-output.txt")
 FILE_COUNT=$(grep -c '^```' "$OUTDIR/model-output.txt" 2>/dev/null || echo 0)
-FILE_COUNT=$((FILE_COUNT / 2))  # opening + closing fences per file
+FILE_COUNT=$((FILE_COUNT / 2))
 
 echo ""
 echo "=== Results ==="
-echo "Wall time:    ${ELAPSED}s"
-echo "Content:      ${CONTENT_CHARS} chars, ${CONTENT_LINES} lines"
-echo "Files output: ~${FILE_COUNT}"
-echo "Saved to:     $OUTDIR"
+echo "Wall time:  ${ELAPSED}s"
+echo "Tokens:     ${USAGE}"
+echo "Content:    ${CONTENT_CHARS} chars"
+echo "Files:      ~${FILE_COUNT}"
 
-# ---- Quick anti-pattern scan ----
+# ---- Semantic quality: n-gram repetition ----
+REPEAT_SCORE=$(python3 -c "
+import sys
+text = open('$OUTDIR/model-output.txt').read()
+# Check for 5-gram repetition (catches degeneration loops)
+from collections import Counter
+if len(text) < 30:
+    print(0)
+else:
+    # Extract 5-grams (word-level)
+    words = text.split()
+    if len(words) < 10:
+        print(0)
+    else:
+        grams = [' '.join(words[i:i+5]) for i in range(len(words)-4)]
+        c = Counter(grams)
+        top_count = c.most_common(1)[0][1]
+        # If any 5-gram appears more than 10 times, it's repeating
+        print(top_count)
+" 2>/dev/null) || REPEAT_SCORE=0
+
+echo "Max 5-gram repeat: ${REPEAT_SCORE} (degeneration if >10)"
+
+# ---- Anti-pattern scan ----
 AP_COUNT=0
 if grep -q 'render_template_string' "$OUTDIR/model-output.txt" 2>/dev/null; then
-    echo "⚠️  ANTI-PATTERN: render_template_string found"
+    echo "ANTI-PATTERN: render_template_string found"
     ((AP_COUNT++)) || true
 fi
 APP_FLASK_COUNT=$(grep -c 'app\s*=\s*Flask' "$OUTDIR/model-output.txt" 2>/dev/null || echo 0)
 if [[ $APP_FLASK_COUNT -gt 1 ]]; then
-    echo "⚠️  ANTI-PATTERN: app = Flask defined ${APP_FLASK_COUNT} times (should be 1)"
+    echo "ANTI-PATTERN: app = Flask defined ${APP_FLASK_COUNT} times"
     ((AP_COUNT++)) || true
 fi
-
 echo "Anti-patterns: $AP_COUNT"
 
 # ---- Save manifest ----
 cat > "$OUTDIR/manifest.json" << EOF
 {
   "canary_chars": $CANARY_CHARS,
-  "canary_newline_pct": $NEWLINE_PCT,
-  "canary_repeat_pct": $REPEAT_SCORE,
+  "canary_slash_pct": $SLASH_PCT,
+  "canary_repeat_pct": $REPEAT_PCT,
   "endpoint": "$ENDPOINT",
   "wall_time_s": $ELAPSED,
   "content_chars": $CONTENT_CHARS,
-  "content_lines": $CONTENT_LINES,
   "file_count": $FILE_COUNT,
+  "max_5gram_repeat": $REPEAT_SCORE,
   "anti_patterns": $AP_COUNT,
+  "tokens": "$USAGE",
   "timestamp": "$(date -Iseconds)"
 }
 EOF
 
+echo ""
 echo "Manifest: $OUTDIR/manifest.json"
 echo "Done."
