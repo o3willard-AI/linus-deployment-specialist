@@ -96,6 +96,7 @@ readonly PROXMOX_NODE="${PROXMOX_NODE:-moxy}"
 readonly PROXMOX_STORAGE="${PROXMOX_STORAGE:-local-lvm}"
 readonly PROXMOX_BRIDGE="${PROXMOX_BRIDGE:-vmbr0}"
 readonly VM_TEMPLATE_ID="${VM_TEMPLATE_ID:-9000}"
+readonly VM_TEMPLATE_FALLBACKS="${VM_TEMPLATE_FALLBACKS:-}"
 readonly VM_OS_TYPE="${VM_OS_TYPE:-ubuntu}"
 
 readonly VM_NAME="${VM_NAME:-}"
@@ -106,6 +107,11 @@ readonly VM_DISK="${VM_DISK:-20}"
 # Global variables (set by functions)
 ALLOCATED_VM_ID=""
 VM_IP=""
+VM_SSH_KEY=""  # Discovered SSH key path (set by configure_vm)
+SELECTED_TEMPLATE_ID=""     # Set by select_template
+SELECTED_TEMPLATE_OSTYPE="" # Set by select_template
+DISCOVERED_TEMPLATES=()     # Array of "id:name:ostype" — set by discover_templates
+readonly PROVISION_START_TIME=$(date +%s)  # For LINUS_COST wall time tracking
 
 # Proxmox API helper — wraps curl with token auth
 _pvesh() {
@@ -207,9 +213,11 @@ _pvesh_set() {
     _pvesh put "/nodes/${PROXMOX_NODE}/qemu/${vm_id}/config" --data-raw "$json"
 }
 
-# Set SSH user based on OS type
-case "${VM_OS_TYPE}" in
-    ubuntu)
+# Set SSH user based on detected OS type from selected template
+# Falls back to VM_OS_TYPE if template detection didn't provide OS info
+_detected_os="${SELECTED_TEMPLATE_OSTYPE:-${VM_OS_TYPE:-ubuntu}}"
+case "${_detected_os}" in
+    ubuntu|debian)
         VM_SSH_USER="ubuntu"
         ;;
     almalinux)
@@ -222,6 +230,27 @@ case "${VM_OS_TYPE}" in
         VM_SSH_USER="cloud-user"
         ;;
 esac
+log_info "SSH user: ${VM_SSH_USER} (detected OS: ${_detected_os})"
+
+# ─── LLM Eval Helper ─────────────────────────────────────────────
+# Calls llm-eval.py for non-deterministic touch points.
+# Returns decision text; falls back to deterministic silently.
+
+_linus_llm_eval() {
+    local mode="$1"
+    local input_text="$2"
+    local eval_script="${REPO_ROOT:-$SCRIPT_DIR/..}/shared/lib/llm-eval.py"
+    
+    if [[ ! -f "$eval_script" ]]; then
+        eval_script="$SCRIPT_DIR/../lib/llm-eval.py"
+    fi
+    
+    if [[ ! -f "$eval_script" ]]; then
+        return 1  # No evaluator available
+    fi
+    
+    python3 "$eval_script" "$mode" <<< "$input_text" 2>/dev/null || true
+}
 
 # -----------------------------------------------------------------------------
 # Function: validate_environment
@@ -266,14 +295,17 @@ validate_environment() {
     }
     log_info "Bridge: ${PROXMOX_BRIDGE} OK"
     
-    # Check template exists - we'll verify via API call instead of qm command
-    log_info "Checking template VM..."
-    local template_check
-    template_check=$(_pvesh get /nodes/${PROXMOX_NODE}/qemu/${VM_TEMPLATE_ID}/status/current 2>&1) || {
-        log_error "Template VM ${VM_TEMPLATE_ID} not found"
+    # Check templates exist via discovery (single API call, no 404 problem)
+    log_info "Checking templates..."
+    if ! discover_templates; then
+        log_error "No templates found on node ${PROXMOX_NODE} — cannot provision VMs"
         return 3
-    }
-    log_info "Template: VM ${VM_TEMPLATE_ID} OK"
+    fi
+    
+    if ! select_template; then
+        log_error "No suitable template found for OS type ${VM_OS_TYPE}"
+        return 3
+    fi
 
     # Validate OS type
     validate_os "${VM_OS_TYPE}" || return 3
@@ -333,6 +365,43 @@ for iface in data:
 }
 
 # -----------------------------------------------------------------------------
+# Function: discover_host_capacity
+# -----------------------------------------------------------------------------
+# Queries Proxmox node status and storage to determine free resources.
+# Used by multi-VM orchestrators to avoid over-provisioning the host.
+# Sets: PROXMOX_FREE_RAM_MB, PROXMOX_FREE_DISK_GB, PROXMOX_TOTAL_CPUS
+# Returns: 0 on success, 1 on API error (non-fatal — capacity tracking disabled)
+# -----------------------------------------------------------------------------
+
+discover_host_capacity() {
+    log_step "1c" "Discovering host capacity"
+
+    local node_status storage_info
+    
+    node_status=$(_pvesh get /nodes/${PROXMOX_NODE}/status 2>/dev/null) || {
+        log_warn "Could not query node status — capacity tracking disabled"
+        return 1
+    }
+    
+    PROXMOX_FREE_RAM_MB=$(echo "$node_status" | jq -r '.data.memory.free // 0' | awk '{print int($1/1048576)}')
+    PROXMOX_TOTAL_CPUS=$(echo "$node_status" | jq -r '.data.cpuinfo.cpus // 0')
+    
+    storage_info=$(_pvesh get "/nodes/${PROXMOX_NODE}/storage/${PROXMOX_STORAGE}/status" 2>/dev/null) || {
+        log_warn "Could not query storage — disk tracking disabled"
+        PROXMOX_FREE_DISK_GB=0
+        return 1
+    }
+    
+    local total_bytes used_bytes
+    total_bytes=$(echo "$storage_info" | jq -r '.data.total // 0')
+    used_bytes=$(echo "$storage_info" | jq -r '.data.used // 0')
+    PROXMOX_FREE_DISK_GB=$(awk "BEGIN {print int(($total_bytes - $used_bytes) / 1073741824)}")
+    
+    log_info "Host capacity: ${PROXMOX_FREE_RAM_MB}MB RAM free, ${PROXMOX_FREE_DISK_GB}GB disk free, ${PROXMOX_TOTAL_CPUS} CPUs"
+    return 0
+}
+
+# -----------------------------------------------------------------------------
 # Function: allocate_vm_id
 # -----------------------------------------------------------------------------
 # Finds the next available VM ID
@@ -360,6 +429,16 @@ print(' '.join(str(i) for i in ids))
             ALLOCATED_VM_ID="$vm_id"
             # Static IP: {subnet}.{vmid} (no DHCP on most Proxmox bridges)
             ALLOCATED_VM_IP="${SUBNET_PREFIX}.${vm_id}"
+            
+            # Capacity guard: warn/refuse if host is near resource limits
+            if [[ -n "${PROXMOX_FREE_RAM_MB:-}" && $VM_RAM -gt $((PROXMOX_FREE_RAM_MB - 1024)) ]]; then
+                log_warn "Low host RAM: ${PROXMOX_FREE_RAM_MB}MB free, VM needs ${VM_RAM}MB (1GB headroom reserved)"
+            fi
+            if [[ -n "${PROXMOX_FREE_DISK_GB:-}" && ${PROXMOX_FREE_DISK_GB:-0} -gt 0 && $VM_DISK -gt ${PROXMOX_FREE_DISK_GB:-0} ]]; then
+                log_error "Insufficient host disk: ${PROXMOX_FREE_DISK_GB}GB free, VM needs ${VM_DISK}GB"
+                return 7
+            fi
+            
             log_success "Allocated VM ID: $vm_id (IP: $ALLOCATED_VM_IP, subnet: $VM_CIDR)"
             return 0
         fi
@@ -372,6 +451,168 @@ print(' '.join(str(i) for i in ids))
 }
 
 # -----------------------------------------------------------------------------
+# Function: discover_templates
+# -----------------------------------------------------------------------------
+# Discovers all available templates on the node by listing all VMs and filtering
+# for template=1. Single API call — no 404 problem unlike per-template status checks.
+# Sets: DISCOVERED_TEMPLATES (array of "id:name:ostype" strings)
+# Returns: 0 on success, non-zero if no templates found
+# -----------------------------------------------------------------------------
+
+discover_templates() {
+    log_info "Discovering templates on node ${PROXMOX_NODE}..."
+    
+    DISCOVERED_TEMPLATES=()
+    
+    local templates_json
+    templates_json=$(_pvesh get "/nodes/${PROXMOX_NODE}/qemu" 2>/dev/null) || {
+        log_warn "Could not list VMs — template discovery failed"
+        return 1
+    }
+    
+    # Parse: extract vmid, name, and template flag
+    while IFS= read -r line; do
+        DISCOVERED_TEMPLATES+=("$line")
+    done < <(echo "$templates_json" | python3 -c "
+import json, sys
+data = json.load(sys.stdin).get('data', [])
+for vm in data:
+    if vm.get('template') == 1:
+        vmid = vm.get('vmid', '')
+        name = vm.get('name', 'unknown')
+        # Try to detect OS type from name
+        ostype = 'unknown'
+        name_lower = name.lower()
+        if 'ubuntu' in name_lower:
+            ostype = 'ubuntu'
+        elif 'alma' in name_lower:
+            ostype = 'almalinux'
+        elif 'rocky' in name_lower:
+            ostype = 'rocky'
+        elif 'debian' in name_lower:
+            ostype = 'debian'
+        print(f'{vmid}:{name}:{ostype}')
+" 2>/dev/null)
+    
+    if [[ ${#DISCOVERED_TEMPLATES[@]} -eq 0 ]]; then
+        log_error "No templates found on node ${PROXMOX_NODE}"
+        return 1
+    fi
+    
+    log_success "Discovered ${#DISCOVERED_TEMPLATES[@]} template(s)"
+    for t in "${DISCOVERED_TEMPLATES[@]}"; do
+        log_info "  Template: $t"
+    done
+    return 0
+}
+
+# -----------------------------------------------------------------------------
+# Function: select_template
+# -----------------------------------------------------------------------------
+# Selects the best template from discovered templates or fallback list.
+# Priority: exact VM_TEMPLATE_ID match → VM_TEMPLATE_FALLBACKS → any template
+# matching VM_OS_TYPE → any template
+# Sets: SELECTED_TEMPLATE_ID, SELECTED_TEMPLATE_OSTYPE
+# Returns: 0 on success, 3 if no template found
+# -----------------------------------------------------------------------------
+
+select_template() {
+    log_step "2b" "Selecting template"
+    
+    # Normalize OS type for matching
+    local os_filter="${VM_OS_TYPE:-ubuntu}"
+    
+    # First: try the explicitly requested template ID
+    if [[ -n "${VM_TEMPLATE_ID:-}" ]]; then
+        for t in "${DISCOVERED_TEMPLATES[@]}"; do
+            local t_id="${t%%:*}"
+            if [[ "$t_id" == "$VM_TEMPLATE_ID" ]]; then
+                SELECTED_TEMPLATE_ID="$t_id"
+                SELECTED_TEMPLATE_OSTYPE=$(echo "$t" | cut -d: -f3)
+                log_success "Selected requested template: VM ${t_id} (${SELECTED_TEMPLATE_OSTYPE})"
+                return 0
+            fi
+        done
+        log_warn "Requested template VM ${VM_TEMPLATE_ID} not found — trying fallbacks"
+    fi
+    
+    # Second: try fallback chain
+    local fallbacks="${VM_TEMPLATE_FALLBACKS:-}"
+    if [[ -n "$fallbacks" ]]; then
+        IFS=',' read -ra fb_arr <<< "$fallbacks"
+        for fb_id in "${fb_arr[@]}"; do
+            fb_id="${fb_id## }"; fb_id="${fb_id%% }"  # trim whitespace
+            for t in "${DISCOVERED_TEMPLATES[@]}"; do
+                local t_id="${t%%:*}"
+                if [[ "$t_id" == "$fb_id" ]]; then
+                    SELECTED_TEMPLATE_ID="$t_id"
+                    SELECTED_TEMPLATE_OSTYPE=$(echo "$t" | cut -d: -f3)
+                    log_success "Selected fallback template: VM ${t_id} (${SELECTED_TEMPLATE_OSTYPE})"
+                    return 0
+                fi
+            done
+        done
+        log_warn "No fallback templates found — trying OS-type match"
+    fi
+    
+    # Third: match by OS type
+    # If multiple matches, use LLM touch point (PP-TP1) to pick the best
+    local matching_templates=()
+    for t in "${DISCOVERED_TEMPLATES[@]}"; do
+        local t_os=$(echo "$t" | cut -d: -f3)
+        if [[ "$t_os" == "$os_filter" ]]; then
+            matching_templates+=("$t")
+        fi
+    done
+    
+    if [[ ${#matching_templates[@]} -eq 1 ]]; then
+        SELECTED_TEMPLATE_ID="${matching_templates[0]%%:*}"
+        SELECTED_TEMPLATE_OSTYPE=$(echo "${matching_templates[0]}" | cut -d: -f3)
+        log_success "Selected OS-matched template: VM ${SELECTED_TEMPLATE_ID} (${SELECTED_TEMPLATE_OSTYPE})"
+        return 0
+    elif [[ ${#matching_templates[@]} -gt 1 ]]; then
+        # PP-TP1: Multiple matching templates — use LLM to pick best
+        local template_list
+        template_list=$(printf '%s\n' "${matching_templates[@]}")
+        local llm_choice
+        llm_choice=$(_linus_llm_eval "proxmox-template-select" "Requested OS: ${os_filter}
+Available templates:
+${template_list}
+Select the best template VM ID." 2>/dev/null) || llm_choice=""
+        
+        if [[ -n "$llm_choice" ]]; then
+            # Verify the LLM picked a valid template ID
+            for t in "${matching_templates[@]}"; do
+                if [[ "${t%%:*}" == "$llm_choice" ]]; then
+                    SELECTED_TEMPLATE_ID="$llm_choice"
+                    SELECTED_TEMPLATE_OSTYPE=$(echo "$t" | cut -d: -f3)
+                    log_success "LLM selected template: VM ${SELECTED_TEMPLATE_ID} (${SELECTED_TEMPLATE_OSTYPE})"
+                    return 0
+                fi
+            done
+        fi
+        # LLM failed or returned invalid — fall through to first match
+        log_info "LLM template selection unavailable — using first match"
+        SELECTED_TEMPLATE_ID="${matching_templates[0]%%:*}"
+        SELECTED_TEMPLATE_OSTYPE=$(echo "${matching_templates[0]}" | cut -d: -f3)
+        log_success "Selected OS-matched template: VM ${SELECTED_TEMPLATE_ID} (${SELECTED_TEMPLATE_OSTYPE})"
+        return 0
+    fi
+    
+    # Last resort: any template
+    if [[ ${#DISCOVERED_TEMPLATES[@]} -gt 0 ]]; then
+        local t="${DISCOVERED_TEMPLATES[0]}"
+        SELECTED_TEMPLATE_ID="${t%%:*}"
+        SELECTED_TEMPLATE_OSTYPE=$(echo "$t" | cut -d: -f3)
+        log_warn "No OS match — using first available template: VM ${SELECTED_TEMPLATE_ID} (${SELECTED_TEMPLATE_OSTYPE})"
+        return 0
+    fi
+    
+    log_error "No templates available on node ${PROXMOX_NODE}"
+    return 3
+}
+
+# -----------------------------------------------------------------------------
 # Function: clone_template
 # -----------------------------------------------------------------------------
 # Clones the template VM to create new VM
@@ -380,16 +621,17 @@ print(' '.join(str(i) for i in ids))
 # -----------------------------------------------------------------------------
 
 clone_template() {
-    log_step "3" "Cloning template VM ${VM_TEMPLATE_ID}"
+    log_step "3" "Cloning template VM ${SELECTED_TEMPLATE_ID}"
 
     local vm_id="$ALLOCATED_VM_ID"
     local vm_name="${VM_NAME:-linus-vm-${vm_id}}"
+    local template_id="${SELECTED_TEMPLATE_ID}"
 
-    log_info "Creating VM ${vm_id} from template ${VM_TEMPLATE_ID}..."
+    log_info "Creating VM ${vm_id} from template ${template_id}..."
 
     # Clone the template using API call
     local clone_result
-    clone_result=$(_pvesh post /nodes/${PROXMOX_NODE}/qemu/${VM_TEMPLATE_ID}/clone \
+    clone_result=$(_pvesh post /nodes/${PROXMOX_NODE}/qemu/${template_id}/clone \
         --data-raw "{\"newid\":${vm_id},\"name\":\"${vm_name}\",\"full\":1,\"storage\":\"${PROXMOX_STORAGE}\"}" 2>/dev/null)
     
     if [[ -z "$clone_result" ]]; then
@@ -483,9 +725,11 @@ configure_network_for_os_type() {
             fi
             
             # For RHEL-based distros, add cloud-init specific settings
-            # This helps with dhcp and network configuration timing
+            # Use the detected SSH user (almalinux/rocky), NOT root — the template
+            # already has ciuser set correctly and SSH key goes to that user's home
+            local _rhel_ssh_user="${VM_SSH_USER:-almalinux}"
             if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
-                --data-raw "{\"ciuser\":\"root\"}" >/dev/null 2>&1; then
+                --data-raw "{\"ciuser\":\"${_rhel_ssh_user}\"}" >/dev/null 2>&1; then
                 log_warn "CIUser not explicitly set (non-fatal)"
             fi
             
@@ -536,6 +780,15 @@ configure_vm() {
 
     local vm_id="$ALLOCATED_VM_ID"
 
+    # PITFALL 25: Default kvm64 CPU lacks AVX2/SSE4.2 — breaks numpy/pytorch.
+    # Set cpu=host so the VM exposes the full host CPU feature set (AVX2, SSE4.2).
+    # Does NOT pin VM to current physical host — migration between compatible CPUs still works.
+    log_info "Setting CPU type: host (AVX2/SSE4.2 enabled)..."
+    if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
+        --data-raw '{"cpu":"host"}' >/dev/null 2>&1; then
+        log_warn "Failed to set cpu=host (non-fatal — VM will use kvm64 default)"
+    fi
+
     # Set CPU and RAM
     log_info "Setting CPU: ${VM_CPU} cores, RAM: ${VM_RAM} MB..."
     if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
@@ -568,6 +821,7 @@ configure_vm() {
     done
     
     if [[ -n "$ssh_key_file" ]]; then
+        VM_SSH_KEY="$ssh_key_file"  # Save for output_result
         local ssh_key_content encoded_key
         ssh_key_content=$(cat "$ssh_key_file" | tr -d '\n')
         # URL-encode the key: spaces→%20, +→%2B, /→%2F
@@ -776,6 +1030,114 @@ verify_ssh_ready() {
 }
 
 # -----------------------------------------------------------------------------
+# Function: verify_vm_capability
+# -----------------------------------------------------------------------------
+# Verifies the VM is capable of running workloads — not just that SSH works.
+# Checks: CPU supports AVX2/SSE4.2 (ML workloads), >2GB free disk, DNS works,
+#         Python is installed.
+# Requires: VM_IP
+# Returns: 0 on success, 8 on capability failure (quality gate)
+# -----------------------------------------------------------------------------
+
+verify_vm_capability() {
+    log_step "7b" "Verifying VM capability"
+
+    local vm_ip="$VM_IP"
+    local ssh_user="${VM_SSH_USER:-ubuntu}"
+    
+    # Build SSH args (same as verify_ssh_ready)
+    local ssh_key=""
+    for candidate in ~/.ssh/id_ed25519_qemu_test ~/.ssh/id_ed25519 ~/.ssh/id_rsa; do
+        if [[ -f "$candidate" ]]; then
+            ssh_key="$candidate"
+            break
+        fi
+    done
+    
+    local ssh_args=(-o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+    [[ -n "$ssh_key" ]] && ssh_args+=(-i "$ssh_key")
+
+    local all_passed=true
+    
+    # Check 1: CPU supports AVX2/SSE4.2 (pitfall #25 — kvm64 CPU breaks numpy)
+    log_info "Checking CPU features..."
+    if ssh "${ssh_args[@]}" "${ssh_user}@${vm_ip}" \
+        "grep -q -E 'avx2|sse4_2' /proc/cpuinfo" 2>/dev/null; then
+        log_info "  CPU supports AVX2/SSE4.2 ✅"
+    else
+        log_warn "  CPU MISSING AVX2/SSE4.2 — ML workloads may crash (kvm64 CPU type)"
+        log_warn "  Fix: set cpu=host in VM config before start"
+        all_passed=false
+    fi
+    
+    # Check 2: >2 GB free disk space
+    log_info "Checking disk space..."
+    local disk_free
+    disk_free=$(ssh "${ssh_args[@]}" "${ssh_user}@${vm_ip}" \
+        "df -BG / | awk 'NR==2 {print \$4}' | sed 's/G//'" 2>/dev/null) || disk_free=0
+    if [[ "$disk_free" -gt 2 ]]; then
+        log_info "  Disk: ${disk_free}GB free ✅"
+    else
+        log_warn "  Disk: ${disk_free}GB free (<2 GB) — may fail during package install"
+        all_passed=false
+    fi
+    
+    # Check 3: DNS works
+    log_info "Checking DNS..."
+    if ssh "${ssh_args[@]}" "${ssh_user}@${vm_ip}" \
+        "getent hosts archive.ubuntu.com >/dev/null 2>&1" 2>/dev/null; then
+        log_info "  DNS working ✅"
+    else
+        log_warn "  DNS not working — apt-get will fail"
+        all_passed=false
+    fi
+    
+    # Check 4: Python available
+    log_info "Checking Python..."
+    if ssh "${ssh_args[@]}" "${ssh_user}@${vm_ip}" \
+        "which python3 >/dev/null 2>&1" 2>/dev/null; then
+        local py_ver
+        py_ver=$(ssh "${ssh_args[@]}" "${ssh_user}@${vm_ip}" \
+            "python3 --version 2>&1" 2>/dev/null) || py_ver="unknown"
+        log_info "  Python: ${py_ver} ✅"
+    else
+        log_warn "  Python not installed — bootstrap may fail"
+        all_passed=false
+    fi
+    
+    if $all_passed; then
+        log_success "VM capability VERIFIED — ready for workload"
+        return 0
+    else
+        # PP-TP3: Capability degraded — use LLM to assess severity
+        local cap_summary="VM at ${vm_ip}:\n"
+        if ssh "${ssh_args[@]}" "${ssh_user}@${vm_ip}" "grep -q -E 'avx2|sse4_2' /proc/cpuinfo" 2>/dev/null; then
+            cap_summary+="- CPU: AVX2/SSE4.2 ✅\n"
+        else
+            cap_summary+="- CPU: MISSING AVX2/SSE4.2 ❌\n"
+        fi
+        cap_summary+="- Disk: ${disk_free}GB free\n"
+        cap_summary+="- DNS: $(ssh "${ssh_args[@]}" "${ssh_user}@${vm_ip}" "getent hosts archive.ubuntu.com >/dev/null 2>&1 && echo '✅' || echo '❌'" 2>/dev/null)\n"
+        cap_summary+="- OS type: ${VM_OS_TYPE}"
+        
+        local llm_assessment
+        llm_assessment=$(_linus_llm_eval "proxmox-bootstrap-judge" "${cap_summary}" 2>/dev/null) || llm_assessment=""
+        
+        if [[ "$llm_assessment" == "VERIFIED" ]]; then
+            log_success "LLM override: VM assessed as VERIFIED despite heuristic warnings"
+            return 0
+        fi
+        
+        log_warn "VM capability DEGRADED — some checks failed (see above)"
+        if [[ -n "$llm_assessment" ]]; then
+            log_info "LLM assessment: ${llm_assessment}"
+        fi
+        # Return 8 = quality gate failure (not a hard error, but degraded)
+        return 8
+    fi
+}
+
+# -----------------------------------------------------------------------------
 # Function: output_result
 # -----------------------------------------------------------------------------
 # Outputs structured result for parsing
@@ -787,39 +1149,63 @@ output_result() {
 
     local vm_name="${VM_NAME:-linus-vm-${ALLOCATED_VM_ID}}"
     local ssh_user="${VM_SSH_USER:-ubuntu}"
+    local wall_time_s=$(($(date +%s) - PROVISION_START_TIME))
 
-    # Structured output for parsing
+    # Structured output for parsing (LINUS_RESULT contract)
     linus_success \
         "VM_ID:${ALLOCATED_VM_ID}" \
         "VM_IP:${VM_IP}" \
         "VM_USER:${ssh_user}" \
+        "VM_SSH_KEY:${VM_SSH_KEY:-}" \
         "VM_NAME:${vm_name}" \
         "VM_CPU:${VM_CPU}" \
         "VM_RAM:${VM_RAM}" \
         "VM_DISK:${VM_DISK}" \
         "VM_NODE:${PROXMOX_NODE}" \
-        "VM_OS_TYPE:${VM_OS_TYPE}"
+        "VM_OS_TYPE:${VM_OS_TYPE}" \
+        "VM_TEMPLATE_ID:${SELECTED_TEMPLATE_ID}" \
+        "COST:wall_time_s=${wall_time_s}" \
+        "RESOURCE:cpu_cores=${VM_CPU},ram_mb=${VM_RAM},disk_gb=${VM_DISK},host_free_ram_mb=${PROXMOX_FREE_RAM_MB:-0},host_free_disk_gb=${PROXMOX_FREE_DISK_GB:-0}"
 }
 
 # -----------------------------------------------------------------------------
 # Function: cleanup_on_error
 # -----------------------------------------------------------------------------
-# Cleanup function called on error
+# Cleanup function called on error (registered as EXIT trap in main)
+# Destroys the VM unless LINUS_KEEP_VM=true (for debugging)
 # -----------------------------------------------------------------------------
 
 cleanup_on_error() {
     local exit_code=$?
     if [[ $exit_code -ne 0 && -n "${ALLOCATED_VM_ID:-}" ]]; then
-        log_warn "Cleaning up VM ${ALLOCATED_VM_ID} due to error..."
-    # PITFALL 13: DELETE requires stopped VM + query params
-    # DELETE does not accept form-encoded body data — must pass as query parameters
-    # Stop the VM first (required for deletion)
-    _pvesh post /nodes/${PROXMOX_NODE}/qemu/${ALLOCATED_VM_ID}/status/stop >/dev/null 2>&1 || true
-    sleep 3
-    
-    # Destroy the VM — pass purge params as QUERY string (NOT --data-raw body)
-    _pvesh delete "/nodes/${PROXMOX_NODE}/qemu/${ALLOCATED_VM_ID}?destroy-unreferenced-disks=1&purge=1" >/dev/null 2>&1 || true
+        if [[ "${LINUS_KEEP_VM:-}" == "true" ]]; then
+            log_warn "Pipeline failed (exit ${exit_code}) — keeping VM ${ALLOCATED_VM_ID} for debugging (LINUS_KEEP_VM=true)"
+            return $exit_code
+        fi
+        
+        log_warn "Pipeline failed (exit ${exit_code}) — destroying VM ${ALLOCATED_VM_ID}"
+        
+        # PITFALL 13: DELETE requires stopped VM + query params
+        # DELETE does not accept form-encoded body data — must pass as query parameters
+        # Stop the VM first (required for deletion)
+        local stop_result
+        stop_result=$(_pvesh post /nodes/${PROXMOX_NODE}/qemu/${ALLOCATED_VM_ID}/status/stop 2>&1) || true
+        log_info "VM ${ALLOCATED_VM_ID} stop: ${stop_result:-ok}"
+        sleep 3
+        
+        # Destroy the VM — pass purge params as QUERY string (NOT --data-raw body)
+        local destroy_result
+        destroy_result=$(_pvesh delete "/nodes/${PROXMOX_NODE}/qemu/${ALLOCATED_VM_ID}?destroy-unreferenced-disks=1&purge=1" 2>&1) || true
+        
+        # Verify destroy succeeded
+        sleep 2
+        if _pvesh get /nodes/${PROXMOX_NODE}/qemu/${ALLOCATED_VM_ID}/status/current >/dev/null 2>&1; then
+            log_error "VM ${ALLOCATED_VM_ID} may still exist after destroy attempt — manual cleanup may be needed"
+        else
+            log_success "VM ${ALLOCATED_VM_ID} destroyed"
+        fi
     fi
+    return $exit_code
 }
 
 # -----------------------------------------------------------------------------
@@ -834,14 +1220,16 @@ main() {
 
     validate_environment || exit $?
     detect_network_config || exit $?
+    discover_host_capacity || true  # Non-fatal: capacity warning only, pipeline continues
     allocate_vm_id || exit $?
     clone_template || exit $?
-    configure_network_for_os_type || exit $?  # NEW: Configure network after clone
+    configure_network_for_os_type || exit $?
     configure_vm || exit $?
     regenerate_cloudinit || exit $?  # Must be after all config, before start
     start_vm || exit $?
     wait_for_network || exit $?
     verify_ssh_ready || exit $?
+    verify_vm_capability || true     # Quality gate — warn but don't abort
     output_result
 
     # Disable cleanup trap on success

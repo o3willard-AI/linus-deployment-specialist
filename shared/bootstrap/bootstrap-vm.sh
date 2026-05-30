@@ -28,8 +28,33 @@ else
 fi
 
 # SSH arguments using bash arrays to avoid word splitting issues
-ssh_args=(-i "$key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+# ServerAliveInterval=30 prevents Proxmox bridge from dropping idle connections
+# during long-running operations (apt-get install, git clone)
+ssh_args=(-i "$key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+          -o ServerAliveInterval=30 -o ServerAliveCountMax=3)
 ssh="ssh ${ssh_args[*]} $VM_USER@$VM_IP"
+
+# Fatal apt error patterns — fail immediately, don't retry
+readonly APT_FATAL_PATTERNS=(
+    "Temporary failure resolving"    # DNS dead
+    "No space left on device"        # Disk full
+    "404  Not Found"                 # Bad sources
+    "Hash Sum mismatch"              # Corrupt package cache
+    "dpkg was interrupted"           # Needs manual intervention
+    "Failed to fetch"                # Network unreachable
+    "Connection refused"             # Proxy/mirror down
+)
+
+# Check if stderr output contains a fatal (non-retryable) apt error
+_is_fatal_apt_error() {
+    local stderr_output="$1"
+    for pattern in "${APT_FATAL_PATTERNS[@]}"; do
+        if [[ "$stderr_output" == *"$pattern"* ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
 
 # Function for apt lock retry with backoff
 apt_retry() {
@@ -56,6 +81,10 @@ apt_retry() {
                     echo "Failed after $max_attempts attempts: $cmd"
                     return $exit_code
                 fi
+            elif _is_fatal_apt_error "$stderr_output"; then
+                # Fatal error — fail immediately, don't retry
+                echo "FATAL APT error (not retryable): $stderr_output"
+                return $exit_code
             else
                 # Not an apt lock error, fail fast
                 echo "Non-lock APT error (exit code $exit_code): $stderr_output"
@@ -70,7 +99,7 @@ ensure_dns() {
     local dns_servers=($BOOTSTRAP_DNS)
     
     # Check if DNS is working
-    if "$ssh" 'getent hosts archive.ubuntu.com' >/dev/null 2>&1; then
+    if $ssh 'getent hosts archive.ubuntu.com' >/dev/null 2>&1; then
         echo "DNS is already working"
         return 0
     fi
@@ -80,13 +109,13 @@ ensure_dns() {
     # Add nameservers to /etc/resolv.conf
     local resolv_conf="# Added by linus bootstrap\nnameserver ${dns_servers[0]}\nnameserver ${dns_servers[1]}\n"
     
-    if ! "$ssh" "sudo bash -c 'echo -e \"$resolv_conf\" > /etc/resolv.conf'"; then
+    if ! $ssh "sudo bash -c 'echo -e \"$resolv_conf\" > /etc/resolv.conf'"; then
         echo "ERROR: Failed to write DNS servers to /etc/resolv.conf"
         return 1
     fi
     
     # Verify DNS works after fix
-    if "$ssh" 'getent hosts archive.ubuntu.com' >/dev/null 2>&1; then
+    if $ssh 'getent hosts archive.ubuntu.com' >/dev/null 2>&1; then
         echo "DNS fixed successfully"
         return 0
     else
@@ -98,7 +127,7 @@ ensure_dns() {
 # Function to check if a package is already installed
 is_package_installed() {
     local pkg="$1"
-    "$ssh" "which $pkg >/dev/null 2>&1" || "$ssh" "$pkg --version >/dev/null 2>&1"
+    $ssh "which $pkg >/dev/null 2>&1" || $ssh "$pkg --version >/dev/null 2>&1"
 }
 
 # Function to install a package with retry logic
@@ -112,10 +141,24 @@ install_package() {
         return 0
     fi
     
-    echo "Installing package: $pkg"
+    echo "Installing package: $pkg (using ${PKG_MANAGER})"
     
-    # Update apt cache with retry
-    if ! apt_retry "$ssh apt-get update"; then
+    # Update package cache with retry
+    if [[ "$PKG_MANAGER" == "dnf" ]]; then
+        # dnf: just install directly (auto-refreshes cache)
+        if $ssh "${PKG_INSTALL_CMD} $pkg"; then
+            echo "Package $pkg installed successfully"
+            echo "LINUS_PKG_${pkg//[-.]/_}:installed"
+            return 0
+        else
+            echo "ERROR: Failed to install package $pkg"
+            echo "LINUS_PKG_${pkg//[-.]/_}:failed"
+            return 1
+        fi
+    fi
+    
+    # apt: update cache first, then install with retry
+    if ! apt_retry "$ssh $PKG_UPDATE_CMD"; then
         echo "ERROR: Failed to update apt cache for package $pkg"
         echo "LINUS_PKG_${pkg//[-.]/_}:failed"
         return 1
@@ -127,13 +170,13 @@ install_package() {
     local attempt=1
     
     while [[ $attempt -le $max_attempts ]]; do
-        if "$ssh" "apt-get install -y $pkg"; then
+        if $ssh "${PKG_INSTALL_CMD} $pkg"; then
             echo "Package $pkg installed successfully"
             echo "LINUS_PKG_${pkg//[-.]/_}:installed"
             return 0
         else
             local exit_code=$?
-            local stderr_output=$("$ssh" "apt-get install -y $pkg" 2>&1)
+            local stderr_output=$($ssh "${PKG_INSTALL_CMD} $pkg" 2>&1)
             
             if [[ "$stderr_output" =~ "Could not get lock" ]] || [[ "$stderr_output" =~ "Unable to acquire the dpkg" ]]; then
                 echo "APT lock detected during package installation (attempt $attempt/$max_attempts): $stderr_output"
@@ -145,6 +188,10 @@ install_package() {
                     echo "LINUS_PKG_${pkg//[-.]/_}:failed"
                     return $exit_code
                 fi
+            elif _is_fatal_apt_error "$stderr_output"; then
+                echo "FATAL APT error installing package $pkg: $stderr_output"
+                echo "LINUS_PKG_${pkg//[-.]/_}:failed"
+                return $exit_code
             else
                 # Not an apt lock error, fail fast
                 echo "Non-lock APT error installing package $pkg (exit code $exit_code): $stderr_output"
@@ -160,7 +207,7 @@ clone_repo() {
     local repo="$1"
     
     # Skip if already cloned
-    if "$ssh" "[ -d /home/$VM_USER/${repo##*/} ]"; then
+    if $ssh "[ -d /home/$VM_USER/${repo##*/} ]"; then
         echo "Repo $repo already cloned"
         echo "LINUS_REPO_${repo//\//_}:cloned"
         return 0
@@ -169,9 +216,9 @@ clone_repo() {
     echo "Cloning repo: $repo"
     
     # Create directory if needed and clone
-    if "$ssh" "mkdir -p /home/$VM_USER && cd /home/$VM_USER && git clone https://github.com/$repo.git"; then
+    if $ssh "mkdir -p /home/$VM_USER && cd /home/$VM_USER && git clone https://github.com/$repo.git"; then
         # Set ownership to VM_USER
-        "$ssh" "sudo chown -R $VM_USER:$VM_USER /home/$VM_USER/${repo##*/}"
+        $ssh "sudo chown -R $VM_USER:$VM_USER /home/$VM_USER/${repo##*/}"
         echo "Repo $repo cloned successfully"
         echo "LINUS_REPO_${repo//\//_}:cloned"
         return 0
@@ -188,8 +235,28 @@ clone_repo() {
 echo "Starting bootstrap process for VM $VM_IP as user $VM_USER"
 
 # Verify SSH access
-if ! "$ssh" 'echo "SSH access verified"'; then
+if ! $ssh 'echo "SSH access verified"'; then
     echo "ERROR: Cannot SSH to $VM_IP as $VM_USER"
+    exit 1
+fi
+
+# Detect package manager on the VM (apt for Debian/Ubuntu, dnf for RHEL/AlmaLinux/Rocky)
+echo "Detecting package manager..."
+if $ssh 'which dnf >/dev/null 2>&1'; then
+    PKG_UPDATE_CMD="dnf check-update -q || true"
+    PKG_INSTALL_CMD="dnf install -y -q"
+    PKG_UPGRADE_CMD="dnf upgrade -y -q"
+    PKG_MANAGER="dnf"
+    echo "  Package manager: dnf (RHEL-based)"
+elif $ssh 'which apt-get >/dev/null 2>&1'; then
+    PKG_UPDATE_CMD="apt-get update -qq"
+    PKG_INSTALL_CMD="apt-get install -y -qq"
+    PKG_UPGRADE_CMD="apt-get upgrade -y -qq"
+    PKG_MANAGER="apt"
+    echo "  Package manager: apt (Debian-based)"
+else
+    echo "ERROR: No supported package manager found (apt-get or dnf)"
+    echo "LINUS_RESULT:FAILURE"
     exit 1
 fi
 
@@ -201,7 +268,7 @@ if ! ensure_dns; then
 fi
 
 # Create working directory on VM
-"$ssh" "mkdir -p $BOOTSTRAP_DIR"
+$ssh "mkdir -p $BOOTSTRAP_DIR"
 
 # Install packages
 if [[ -n "$BOOTSTRAP_PACKAGES" ]]; then
@@ -225,3 +292,6 @@ fi
 
 echo "Bootstrap process completed successfully"
 echo "LINUS_RESULT:SUCCESS"
+echo "LINUS_BOOTSTRAP_PACKAGES:${BOOTSTRAP_PACKAGES:-none}"
+echo "LINUS_BOOTSTRAP_REPOS:${BOOTSTRAP_REPOS:-none}"
+echo "LINUS_BOOTSTRAP_DIR:${BOOTSTRAP_DIR}"
