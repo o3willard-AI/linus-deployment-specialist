@@ -29,10 +29,13 @@ fi
 
 # SSH arguments using bash arrays to avoid word splitting issues
 # ServerAliveInterval=30 prevents Proxmox bridge from dropping idle connections
-# during long-running operations (apt-get install, git clone)
+# during long-running operations (apt-get install, git clone).
+#
+# STANDARD (§3.1.5): Arrays ONLY for SSH command construction.
+# Never build SSH as a string variable — use "${ssh_args[@]}" for all calls.
 ssh_args=(-i "$key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-          -o ServerAliveInterval=30 -o ServerAliveCountMax=3)
-ssh="ssh ${ssh_args[*]} $VM_USER@$VM_IP"
+          -o ServerAliveInterval=30 -o ServerAliveCountMax=3
+          "${VM_USER}@${VM_IP}")
 
 # Fatal apt error patterns — fail immediately, don't retry
 readonly APT_FATAL_PATTERNS=(
@@ -99,7 +102,7 @@ ensure_dns() {
     local dns_servers=($BOOTSTRAP_DNS)
     
     # Check if DNS is working
-    if $ssh 'getent hosts archive.ubuntu.com' >/dev/null 2>&1; then
+    if ssh "${ssh_args[@]}" 'getent hosts archive.ubuntu.com' >/dev/null 2>&1; then
         echo "DNS is already working"
         return 0
     fi
@@ -109,13 +112,13 @@ ensure_dns() {
     # Add nameservers to /etc/resolv.conf
     local resolv_conf="# Added by linus bootstrap\nnameserver ${dns_servers[0]}\nnameserver ${dns_servers[1]}\n"
     
-    if ! $ssh "sudo bash -c 'echo -e \"$resolv_conf\" > /etc/resolv.conf'"; then
+    if ! ssh "${ssh_args[@]}" "sudo bash -c 'echo -e \"$resolv_conf\" > /etc/resolv.conf'"; then
         echo "ERROR: Failed to write DNS servers to /etc/resolv.conf"
         return 1
     fi
     
     # Verify DNS works after fix
-    if $ssh 'getent hosts archive.ubuntu.com' >/dev/null 2>&1; then
+    if ssh "${ssh_args[@]}" 'getent hosts archive.ubuntu.com' >/dev/null 2>&1; then
         echo "DNS fixed successfully"
         return 0
     else
@@ -127,7 +130,7 @@ ensure_dns() {
 # Function to check if a package is already installed
 is_package_installed() {
     local pkg="$1"
-    $ssh "which $pkg >/dev/null 2>&1" || $ssh "$pkg --version >/dev/null 2>&1"
+    ssh "${ssh_args[@]}" "which $pkg >/dev/null 2>&1" || ssh "${ssh_args[@]}" "$pkg --version >/dev/null 2>&1"
 }
 
 # Function to install a package with retry logic
@@ -146,7 +149,7 @@ install_package() {
     # Update package cache with retry
     if [[ "$PKG_MANAGER" == "dnf" ]]; then
         # dnf: just install directly (auto-refreshes cache)
-        if $ssh "${PKG_INSTALL_CMD} $pkg"; then
+        if ssh "${ssh_args[@]}" "${PKG_INSTALL_CMD} $pkg"; then
             echo "Package $pkg installed successfully"
             echo "LINUS_PKG_${pkg//[-.]/_}:installed"
             return 0
@@ -158,7 +161,7 @@ install_package() {
     fi
     
     # apt: update cache first, then install with retry
-    if ! apt_retry "$ssh $PKG_UPDATE_CMD"; then
+    if ! apt_retry "ssh "${ssh_args[@]}" $PKG_UPDATE_CMD"; then
         echo "ERROR: Failed to update apt cache for package $pkg"
         echo "LINUS_PKG_${pkg//[-.]/_}:failed"
         return 1
@@ -170,13 +173,13 @@ install_package() {
     local attempt=1
     
     while [[ $attempt -le $max_attempts ]]; do
-        if $ssh "${PKG_INSTALL_CMD} $pkg"; then
+        if ssh "${ssh_args[@]}" "${PKG_INSTALL_CMD} $pkg"; then
             echo "Package $pkg installed successfully"
             echo "LINUS_PKG_${pkg//[-.]/_}:installed"
             return 0
         else
             local exit_code=$?
-            local stderr_output=$($ssh "${PKG_INSTALL_CMD} $pkg" 2>&1)
+            local stderr_output=$(ssh "${ssh_args[@]}" "${PKG_INSTALL_CMD} $pkg" 2>&1)
             
             if [[ "$stderr_output" =~ "Could not get lock" ]] || [[ "$stderr_output" =~ "Unable to acquire the dpkg" ]]; then
                 echo "APT lock detected during package installation (attempt $attempt/$max_attempts): $stderr_output"
@@ -207,7 +210,7 @@ clone_repo() {
     local repo="$1"
     
     # Skip if already cloned
-    if $ssh "[ -d /home/$VM_USER/${repo##*/} ]"; then
+    if ssh "${ssh_args[@]}" "[ -d /home/$VM_USER/${repo##*/} ]"; then
         echo "Repo $repo already cloned"
         echo "LINUS_REPO_${repo//\//_}:cloned"
         return 0
@@ -216,9 +219,9 @@ clone_repo() {
     echo "Cloning repo: $repo"
     
     # Create directory if needed and clone
-    if $ssh "mkdir -p /home/$VM_USER && cd /home/$VM_USER && git clone https://github.com/$repo.git"; then
+    if ssh "${ssh_args[@]}" "mkdir -p /home/$VM_USER && cd /home/$VM_USER && git clone https://github.com/$repo.git"; then
         # Set ownership to VM_USER
-        $ssh "sudo chown -R $VM_USER:$VM_USER /home/$VM_USER/${repo##*/}"
+        ssh "${ssh_args[@]}" "sudo chown -R $VM_USER:$VM_USER /home/$VM_USER/${repo##*/}"
         echo "Repo $repo cloned successfully"
         echo "LINUS_REPO_${repo//\//_}:cloned"
         return 0
@@ -235,20 +238,20 @@ clone_repo() {
 echo "Starting bootstrap process for VM $VM_IP as user $VM_USER"
 
 # Verify SSH access
-if ! $ssh 'echo "SSH access verified"'; then
+if ! ssh "${ssh_args[@]}" 'echo "SSH access verified"'; then
     echo "ERROR: Cannot SSH to $VM_IP as $VM_USER"
     exit 1
 fi
 
 # Detect package manager on the VM (apt for Debian/Ubuntu, dnf for RHEL/AlmaLinux/Rocky)
 echo "Detecting package manager..."
-if $ssh 'which dnf >/dev/null 2>&1'; then
+if ssh "${ssh_args[@]}" 'which dnf >/dev/null 2>&1'; then
     PKG_UPDATE_CMD="dnf check-update -q || true"
     PKG_INSTALL_CMD="dnf install -y -q"
     PKG_UPGRADE_CMD="dnf upgrade -y -q"
     PKG_MANAGER="dnf"
     echo "  Package manager: dnf (RHEL-based)"
-elif $ssh 'which apt-get >/dev/null 2>&1'; then
+elif ssh "${ssh_args[@]}" 'which apt-get >/dev/null 2>&1'; then
     PKG_UPDATE_CMD="apt-get update -qq"
     PKG_INSTALL_CMD="apt-get install -y -qq"
     PKG_UPGRADE_CMD="apt-get upgrade -y -qq"
@@ -268,7 +271,7 @@ if ! ensure_dns; then
 fi
 
 # Create working directory on VM
-$ssh "mkdir -p $BOOTSTRAP_DIR"
+ssh "${ssh_args[@]}" "mkdir -p $BOOTSTRAP_DIR"
 
 # Install packages
 if [[ -n "$BOOTSTRAP_PACKAGES" ]]; then

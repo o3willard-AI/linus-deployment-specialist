@@ -48,6 +48,7 @@ source_lib "logging.sh" "validation.sh" "retry.sh"
 source "$SCRIPT_DIR/../lib/vast-sizing.sh"
 # Quality gate helpers (LLM eval for offer selection, build watch, run strategy)
 source "$SCRIPT_DIR/../lib/quality-gate.sh"
+source "$SCRIPT_DIR/../lib/quality-gate-vast.sh"
 
 # -----------------------------------------------------------------------------
 # Configuration from environment with defaults
@@ -75,6 +76,11 @@ ALLOCATED_SSH_PORT=""
 ALLOCATED_PROXY_PORT=""
 CALCULATED_DISK_GB=""
 ALLOCATED_INSTANCE_PRICE=""  # P1.4: Cost tracking — populated from offer JSON
+
+LINUS_WARNINGS=()  # Accumulated non-fatal warning tags (§3.1.6)
+
+# Warning helper — appends tag to global accumulator
+_warn_tag() { LINUS_WARNINGS+=("$1"); }
 
 # -----------------------------------------------------------------------------
 # Credential auto-discovery (matches proxmox.sh pattern)
@@ -469,6 +475,7 @@ wait_for_running() {
                     done
                     if [[ "$probe_ok" != "true" ]]; then
                         log_warn "Instance reported 'running' but SSH probe failed — bad host proxy"
+                        _warn_tag "ssh_proxy_dead"
                         ALLOCATED_BAD_HOST_ID="$machine_id"
                         return 6
                     fi
@@ -583,7 +590,8 @@ output_result() {
         "GPU:${VAST_GPU_NAME}" \
         "CUDA_ARCH:${VAST_CUDA_ARCH}" \
         "IMAGE:${VAST_IMAGE}" \
-        "INSTANCE_PRICE:${ALLOCATED_INSTANCE_PRICE:-0}"
+        "INSTANCE_PRICE:${ALLOCATED_INSTANCE_PRICE:-0}" \
+        "WARNINGS:${LINUS_WARNINGS[*]:-none}"
 }
 
 # -----------------------------------------------------------------------------
@@ -658,6 +666,7 @@ main() {
         case $run_exit in
             5)  # CDI passthrough failure — host is bad
                 log_warn "CDI/GPU passthrough failure on host ${bad_host} — excluding from future searches"
+                _warn_tag "cdi_passthrough_failure"
                 ;;
             6)  # Timeout — might be host or might be transient
                 log_warn "Instance timed out on host ${bad_host} — excluding for safety"

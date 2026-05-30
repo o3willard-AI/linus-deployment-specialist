@@ -71,6 +71,7 @@ source_lib "logging.sh" "validation.sh" "retry.sh"
 source "$SCRIPT_DIR/../lib/vast-sizing.sh"
 # Quality gate helpers (Content-Range parsing, 5-gram detection, LLM eval)
 source "$SCRIPT_DIR/../lib/quality-gate.sh"
+source "$SCRIPT_DIR/../lib/quality-gate-vast.sh"
 
 # -----------------------------------------------------------------------------
 # Configuration from environment with defaults

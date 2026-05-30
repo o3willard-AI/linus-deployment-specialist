@@ -166,12 +166,11 @@ function provision_single_vm() {
         fi
         
         # Parse output for VM details (strip all whitespace including \r\n)
-        local vm_ip
+        local vm_ip vm_user vm_id vm_resource
         vm_ip=$(echo "$output" | grep "LINUS_VM_IP:" | cut -d: -f2- | tr -d '\r\n\t ')
-        local vm_user
         vm_user=$(echo "$output" | grep "LINUS_VM_USER:" | cut -d: -f2- | tr -d '\r\n\t ')
-        local vm_id
         vm_id=$(echo "$output" | grep "LINUS_VM_ID:" | cut -d: -f2- | tr -d '\r\n\t ')
+        vm_resource=$(echo "$output" | grep "LINUS_RESOURCE:" | cut -d: -f2- | tr -d '\r\n\t ')
         
         if [[ -z "${vm_ip}" || -z "${vm_user}" ]]; then
             log_error "Failed to extract VM details from provisioning output for ${vm_name}"
@@ -330,6 +329,11 @@ main() {
     
     # Initialize tracking variables
     VM_DETAILS=()
+    CUMULATIVE_RAM_MB=0
+    CUMULATIVE_CPU=0
+    CUMULATIVE_DISK_GB=0
+    HOST_FREE_RAM_MB=0
+    HOST_FREE_DISK_GB=0
     
     # Stage 1: Provision multiple VMs
     log_info "=== Stage 1: Provisioning ${VM_COUNT} VMs ==="
@@ -337,12 +341,46 @@ main() {
     for ((i=1; i<=VM_COUNT; i++)); do
         log_info "Provisioning VM $i of $VM_COUNT"
         
+        # Capacity check: refuse if cumulative usage exceeds host free resources
+        if [[ $HOST_FREE_RAM_MB -gt 0 && $CUMULATIVE_RAM_MB -gt 0 && \
+              $((CUMULATIVE_RAM_MB + VM_RAM)) -gt $((HOST_FREE_RAM_MB - 1024)) ]]; then
+            log_error "Host RAM near capacity: ${HOST_FREE_RAM_MB}MB free, cumulative ${CUMULATIVE_RAM_MB}MB used, VM needs ${VM_RAM}MB"
+            echo "LINUS_RESULT:FAILURE"
+            echo "LINUS_ERROR:Resource exhausted — insufficient host RAM"
+            return 7
+        fi
+        if [[ $HOST_FREE_DISK_GB -gt 0 && $CUMULATIVE_DISK_GB -gt 0 && \
+              $((CUMULATIVE_DISK_GB + VM_DISK)) -gt $HOST_FREE_DISK_GB ]]; then
+            log_error "Host disk near capacity: ${HOST_FREE_DISK_GB}GB free, cumulative ${CUMULATIVE_DISK_GB}GB used, VM needs ${VM_DISK}GB"
+            echo "LINUS_RESULT:FAILURE"
+            echo "LINUS_ERROR:Resource exhausted — insufficient host disk"
+            return 7
+        fi
+        
         local vm_details
         vm_details=$(provision_single_vm "$i" "${BASE_NAME}") || {
             echo "LINUS_RESULT:FAILURE"
             echo "LINUS_ERROR:VM provisioning failed"
             return 4
         }
+        
+        # Track cumulative resource usage from LINUS_RESOURCE output
+        if [[ -n "${vm_resource:-}" ]]; then
+            local parsed_ram parsed_cpu parsed_disk parsed_host_ram parsed_host_disk
+            parsed_ram=$(echo "$vm_resource" | grep -oP 'ram_mb=\K[0-9]+' || echo "0")
+            parsed_cpu=$(echo "$vm_resource" | grep -oP 'cpu_cores=\K[0-9]+' || echo "0")
+            parsed_disk=$(echo "$vm_resource" | grep -oP 'disk_gb=\K[0-9]+' || echo "0")
+            parsed_host_ram=$(echo "$vm_resource" | grep -oP 'host_free_ram_mb=\K[0-9]+' || echo "0")
+            parsed_host_disk=$(echo "$vm_resource" | grep -oP 'host_free_disk_gb=\K[0-9]+' || echo "0")
+            
+            CUMULATIVE_RAM_MB=$((CUMULATIVE_RAM_MB + parsed_ram))
+            CUMULATIVE_CPU=$((CUMULATIVE_CPU + parsed_cpu))
+            CUMULATIVE_DISK_GB=$((CUMULATIVE_DISK_GB + parsed_disk))
+            HOST_FREE_RAM_MB=$parsed_host_ram
+            HOST_FREE_DISK_GB=$parsed_host_disk
+            
+            log_info "Resource usage: +${parsed_ram}MB RAM, +${parsed_cpu} CPU, +${parsed_disk}GB disk (cumulative: ${CUMULATIVE_RAM_MB}MB / ${HOST_FREE_RAM_MB}MB host free)"
+        fi
         
         # Store VM details
         VM_DETAILS+=("$vm_details")

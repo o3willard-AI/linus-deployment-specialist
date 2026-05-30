@@ -111,7 +111,16 @@ VM_SSH_KEY=""  # Discovered SSH key path (set by configure_vm)
 SELECTED_TEMPLATE_ID=""     # Set by select_template
 SELECTED_TEMPLATE_OSTYPE="" # Set by select_template
 DISCOVERED_TEMPLATES=()     # Array of "id:name:ostype" — set by discover_templates
+LINUS_WARNINGS=()           # Accumulated non-fatal warning tags (§3.1.6)
 readonly PROVISION_START_TIME=$(date +%s)  # For LINUS_COST wall time tracking
+
+# ─── Warning Helper ───────────────────────────────────────────────
+# Appends a warning tag to the global accumulator.
+# Usage: _warn_tag "qemu_agent_failed"
+
+_warn_tag() {
+    LINUS_WARNINGS+=("$1")
+}
 
 # Proxmox API helper — wraps curl with token auth
 _pvesh() {
@@ -213,24 +222,36 @@ _pvesh_set() {
     _pvesh put "/nodes/${PROXMOX_NODE}/qemu/${vm_id}/config" --data-raw "$json"
 }
 
-# Set SSH user based on detected OS type from selected template
-# Falls back to VM_OS_TYPE if template detection didn't provide OS info
+# Set SSH user from the selected template's actual ciuser config (§3.4).
+# Falls back to OS-type-based detection if template config doesn't specify.
 _detected_os="${SELECTED_TEMPLATE_OSTYPE:-${VM_OS_TYPE:-ubuntu}}"
-case "${_detected_os}" in
-    ubuntu|debian)
-        VM_SSH_USER="ubuntu"
-        ;;
-    almalinux)
-        VM_SSH_USER="almalinux"
-        ;;
-    rocky)
-        VM_SSH_USER="rocky"
-        ;;
-    *)
-        VM_SSH_USER="cloud-user"
-        ;;
-esac
-log_info "SSH user: ${VM_SSH_USER} (detected OS: ${_detected_os})"
+
+# Read template's existing ciuser — don't guess
+template_ciuser=""
+if [[ -n "${SELECTED_TEMPLATE_ID:-}" ]]; then
+    template_ciuser=$(read_template_config "$SELECTED_TEMPLATE_ID" | jq -r '.data.ciuser // ""' 2>/dev/null) || template_ciuser=""
+fi
+
+if [[ -n "$template_ciuser" && "$template_ciuser" != "null" ]]; then
+    VM_SSH_USER="$template_ciuser"
+    log_info "SSH user from template config: ${VM_SSH_USER} (ciuser)"
+else
+    case "${_detected_os}" in
+        ubuntu|debian)
+            VM_SSH_USER="ubuntu"
+            ;;
+        almalinux)
+            VM_SSH_USER="almalinux"
+            ;;
+        rocky)
+            VM_SSH_USER="rocky"
+            ;;
+        *)
+            VM_SSH_USER="cloud-user"
+            ;;
+    esac
+    log_info "SSH user from OS detection: ${VM_SSH_USER} (detected OS: ${_detected_os})"
+fi
 
 # ─── LLM Eval Helper ─────────────────────────────────────────────
 # Calls llm-eval.py for non-deterministic touch points.
@@ -380,6 +401,7 @@ discover_host_capacity() {
     
     node_status=$(_pvesh get /nodes/${PROXMOX_NODE}/status 2>/dev/null) || {
         log_warn "Could not query node status — capacity tracking disabled"
+        _warn_tag "capacity_discovery_failed"
         return 1
     }
     
@@ -613,6 +635,22 @@ Select the best template VM ID." 2>/dev/null) || llm_choice=""
 }
 
 # -----------------------------------------------------------------------------
+# Function: read_template_config
+# -----------------------------------------------------------------------------
+# Reads the existing configuration of a template VM before modifying it.
+# Returns config as JSON. Used to preserve existing ciuser, ostype, cpu settings
+# rather than guessing OS defaults (§3.4).
+#
+# Args: template_id
+# Returns: JSON config on stdout, empty on error
+# -----------------------------------------------------------------------------
+
+read_template_config() {
+    local template_id="$1"
+    _pvesh get "/nodes/${PROXMOX_NODE}/qemu/${template_id}/config" 2>/dev/null || echo "{}"
+}
+
+# -----------------------------------------------------------------------------
 # Function: clone_template
 # -----------------------------------------------------------------------------
 # Clones the template VM to create new VM
@@ -716,12 +754,14 @@ configure_network_for_os_type() {
             if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
                 --data-raw "{\"agent\":1,\"agent-xpra\":0}" >/dev/null 2>&1; then
                 log_warn "Failed to configure QEMU agent (non-fatal)"
+                _warn_tag "qemu_agent_failed"
             fi
             
             # Configure network0 with explicit bridge settings
             if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
                 --data-raw "{\"net0\":\"model=virtio,bridge=${PROXMOX_BRIDGE},connect=on,network=default\"}" >/dev/null 2>&1; then
                 log_warn "Failed to configure net0 bridge (using default: ${PROXMOX_BRIDGE})"
+                _warn_tag "net0_bridge_failed"
             fi
             
             # For RHEL-based distros, add cloud-init specific settings
@@ -738,6 +778,7 @@ configure_network_for_os_type() {
             if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
                 --data-raw "{\"net0\":\"ipv4=dhcp\"}" >/dev/null 2>&1; then
                 log_warn "Failed to enable DHCP on net0 (non-fatal)"
+                _warn_tag "dhcp_config_failed"
             fi
             
             log_success "Network configuration applied for AlmaLinux/Rocky"
@@ -787,6 +828,7 @@ configure_vm() {
     if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
         --data-raw '{"cpu":"host"}' >/dev/null 2>&1; then
         log_warn "Failed to set cpu=host (non-fatal — VM will use kvm64 default)"
+        _warn_tag "cpu_host_failed"
     fi
 
     # Set CPU and RAM
@@ -839,6 +881,7 @@ configure_vm() {
             else
                 log_warn "SSH key injection failed (both API and sshpass)"
                 log_warn "VM will be reachable by ping but not SSH"
+                _warn_tag "ssh_key_injection_failed"
             fi
         else
             log_warn "API key injection failed and PROXMOX_SSH_PASS not set"
@@ -880,6 +923,7 @@ regenerate_cloudinit() {
     response=$(curl -sk --fail -X PUT -H "$auth_header" -w "\n%{http_code}" "$url" 2>&1) || {
         http_code="${response##*$'\n'}"
         log_warn "Cloud-init regeneration failed (HTTP ${http_code})"
+        _warn_tag "cloudinit_regen_failed"
         return 1
     }
     
@@ -887,6 +931,7 @@ regenerate_cloudinit() {
     local final_http_code="${response##*$'\n'}"
     if [[ "$final_http_code" != "200" ]]; then
         log_warn "Cloud-init regeneration returned HTTP ${final_http_code} (expected 200)"
+        _warn_tag "cloudinit_http_${final_http_code}"
         return 1
     fi
     
@@ -1026,6 +1071,7 @@ verify_ssh_ready() {
         "exit 0" 2>&1 | grep -iE 'debug1.*(Offering|Authenticat|Trying|identity|auth|Accepted|denied|closed|Permission|key type)' | tail -5 || true
 
     log_error "SSH not accessible after ${max_wait}s"
+    _warn_tag "ssh_timeout"
     return 6
 }
 
@@ -1129,6 +1175,7 @@ verify_vm_capability() {
         fi
         
         log_warn "VM capability DEGRADED — some checks failed (see above)"
+        _warn_tag "capability_degraded"
         if [[ -n "$llm_assessment" ]]; then
             log_info "LLM assessment: ${llm_assessment}"
         fi
@@ -1165,7 +1212,8 @@ output_result() {
         "VM_OS_TYPE:${VM_OS_TYPE}" \
         "VM_TEMPLATE_ID:${SELECTED_TEMPLATE_ID}" \
         "COST:wall_time_s=${wall_time_s}" \
-        "RESOURCE:cpu_cores=${VM_CPU},ram_mb=${VM_RAM},disk_gb=${VM_DISK},host_free_ram_mb=${PROXMOX_FREE_RAM_MB:-0},host_free_disk_gb=${PROXMOX_FREE_DISK_GB:-0}"
+        "RESOURCE:cpu_cores=${VM_CPU},ram_mb=${VM_RAM},disk_gb=${VM_DISK},host_free_ram_mb=${PROXMOX_FREE_RAM_MB:-0},host_free_disk_gb=${PROXMOX_FREE_DISK_GB:-0}" \
+        "WARNINGS:${LINUS_WARNINGS[*]:-none}"
 }
 
 # -----------------------------------------------------------------------------
