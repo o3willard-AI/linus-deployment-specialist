@@ -129,9 +129,9 @@ declare -A AMI_OWNERS=(
 
 # AMI name filters per OS (used in describe-images query)
 declare -A AMI_FILTERS=(
-    [ubuntu]="ubuntu/images/hvm-ssd/ubuntu-noble-24.04-amd64-server-*"
-    [ubuntu2404]="ubuntu/images/hvm-ssd/ubuntu-noble-24.04-amd64-server-*"
-    [ubuntu2204]="ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"
+    [ubuntu]="ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"
+    [ubuntu2404]="ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"
+    [ubuntu2204]="ubuntu/images/hvm-ssd-gp3/ubuntu-jammy-22.04-amd64-server-*"
     [almalinux]="AlmaLinux OS 9.*x86_64*"
     [alma9]="AlmaLinux OS 9.*x86_64*"
     [debian]="debian-12-amd64-*"
