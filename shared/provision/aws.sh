@@ -158,7 +158,9 @@ declare -A OS_SSH_USERS=(
 )
 
 # Instance type mapping based on CPU/RAM requirements
+# t3.* = x86_64 (Intel), t4g.* = arm64 (Graviton)
 declare -A INSTANCE_TYPES=(
+    # x86_64 (Intel Xeon)
     ["1-1024"]="t3.micro"
     ["1-2048"]="t3.small"
     ["2-2048"]="t3.small"
@@ -168,6 +170,42 @@ declare -A INSTANCE_TYPES=(
     ["4-16384"]="t3.xlarge"
     ["8-16384"]="t3.xlarge"
     ["8-32768"]="t3.2xlarge"
+    # arm64 (AWS Graviton) — better price/performance
+    ["1-1024-arm"]="t4g.micro"
+    ["2-2048-arm"]="t4g.small"
+    ["2-4096-arm"]="t4g.medium"
+    ["4-8192-arm"]="t4g.large"
+    ["4-16384-arm"]="t4g.large"
+    ["8-16384-arm"]="t4g.xlarge"
+    ["8-32768-arm"]="t4g.2xlarge"
+)
+
+# Architecture detection from instance type prefix
+# t3.*, t2.*, m5.*, c5.* → x86_64
+# t4g.*, m6g.*, c6g.*, m7g.* → arm64
+declare -A INSTANCE_ARCHITECTURES=(
+    [t2]="x86_64"   [t3]="x86_64"   [t3a]="x86_64"
+    [m5]="x86_64"   [m5a]="x86_64"  [m6i]="x86_64"
+    [c5]="x86_64"   [c5a]="x86_64"  [c6i]="x86_64"
+    [r5]="x86_64"   [r5a]="x86_64"  [r6i]="x86_64"
+    [t4g]="arm64"   [m6g]="arm64"   [c6g]="arm64"
+    [r6g]="arm64"   [m7g]="arm64"   [c7g]="arm64"
+)
+
+# Root device name per OS type
+# Ubuntu/Debian use /dev/sda1, Amazon Linux uses /dev/xvda, newer AMIs use /dev/nvme0n1
+declare -A OS_ROOT_DEVICES=(
+    [ubuntu]="/dev/sda1"
+    [ubuntu2404]="/dev/sda1"
+    [ubuntu2204]="/dev/sda1"
+    [almalinux]="/dev/sda1"
+    [alma9]="/dev/sda1"
+    [debian]="/dev/sda1"
+    [debian12]="/dev/sda1"
+    [rocky]="/dev/sda1"
+    [rocky9]="/dev/sda1"
+    [amazonlinux]="/dev/xvda"
+    [al2023]="/dev/xvda"
 )
 
 # Global variables (Tier 3 contract names)
@@ -177,6 +215,8 @@ VM_SSH_USER=""              # SSH username (auto-detected from OS)
 VM_SSH_KEY=""               # Path to SSH private key
 SELECTED_INSTANCE_TYPE=""   # Resolved instance type
 SELECTED_AMI_ID=""          # Resolved AMI ID
+SELECTED_ARCHITECTURE=""    # Detected architecture (x86_64 or arm64)
+SELECTED_ROOT_DEVICE=""     # Root device name from AMI metadata
 CREATED_SECURITY_GROUP=""   # SG created by us (not user-supplied)
 LINUS_WARNINGS=()           # Accumulated non-fatal warning tags (§3.1.6)
 readonly PROVISION_START_TIME=$(date +%s)  # For LINUS_COST wall time tracking
@@ -276,6 +316,39 @@ validate_environment() {
     return 0
 }
 
+# ─── Architecture Detection ───────────────────────────────────────
+# Determines the CPU architecture for the instance.
+# Priority: AWS_ARCHITECTURE env → instance type prefix → default x86_64
+# Sets: SELECTED_ARCHITECTURE
+# ───────────────────────────────────────────────────────────────────
+
+detect_architecture() {
+    local instance_type="$1"
+
+    # Explicit override
+    if [[ -n "${AWS_ARCHITECTURE:-}" ]]; then
+        SELECTED_ARCHITECTURE="$AWS_ARCHITECTURE"
+        log_info "Architecture: ${SELECTED_ARCHITECTURE} (explicit)"
+        return 0
+    fi
+
+    # Detect from instance type prefix (e.g., t4g → arm64, t3 → x86_64)
+    local prefix="${instance_type%%.*}"  # t4g from t4g.micro
+    local detected="${INSTANCE_ARCHITECTURES[$prefix]:-}"
+
+    if [[ -n "$detected" ]]; then
+        SELECTED_ARCHITECTURE="$detected"
+        log_info "Architecture: ${SELECTED_ARCHITECTURE} (detected from ${instance_type})"
+        return 0
+    fi
+
+    # Default
+    _warn_tag "architecture_unknown"
+    log_warn "Unknown architecture for instance type '${instance_type}' — defaulting to x86_64"
+    SELECTED_ARCHITECTURE="x86_64"
+    return 0
+}
+
 # -----------------------------------------------------------------------------
 # Function: select_instance_type
 # -----------------------------------------------------------------------------
@@ -287,14 +360,31 @@ select_instance_type() {
     if [[ -n "$AWS_INSTANCE_TYPE" ]]; then
         SELECTED_INSTANCE_TYPE="$AWS_INSTANCE_TYPE"
         log_info "Using specified instance type: ${SELECTED_INSTANCE_TYPE}"
+        detect_architecture "$SELECTED_INSTANCE_TYPE"
         return 0
     fi
 
     local key="${VM_CPU}-${VM_RAM}"
+    local arch_suffix=""
 
+    # If architecture is explicitly set to arm64, look for ARM instance types first
+    if [[ "${AWS_ARCHITECTURE:-}" == "arm64" ]]; then
+        arch_suffix="-arm"
+    fi
+
+    # Try exact match with architecture suffix
+    if [[ -n "$arch_suffix" && -n "${INSTANCE_TYPES[${key}${arch_suffix}]:-}" ]]; then
+        SELECTED_INSTANCE_TYPE="${INSTANCE_TYPES[${key}${arch_suffix}]}"
+        log_info "Auto-selected ARM instance: ${SELECTED_INSTANCE_TYPE} (${VM_CPU} CPU / ${VM_RAM} MB RAM)"
+        detect_architecture "$SELECTED_INSTANCE_TYPE"
+        return 0
+    fi
+
+    # Try standard x86_64 match
     if [[ -n "${INSTANCE_TYPES[$key]:-}" ]]; then
         SELECTED_INSTANCE_TYPE="${INSTANCE_TYPES[$key]}"
         log_info "Auto-selected instance type: ${SELECTED_INSTANCE_TYPE} (${VM_CPU} CPU / ${VM_RAM} MB RAM)"
+        detect_architecture "$SELECTED_INSTANCE_TYPE"
         return 0
     fi
 
@@ -302,6 +392,7 @@ select_instance_type() {
     _warn_tag "instance_type_fallback"
     log_warn "No exact match for ${VM_CPU} CPU / ${VM_RAM} MB RAM, using t3.medium"
     SELECTED_INSTANCE_TYPE="t3.medium"
+    detect_architecture "$SELECTED_INSTANCE_TYPE"
     return 0
 }
 
@@ -332,25 +423,44 @@ get_ami() {
         return 5
     fi
 
-    log_info "Finding latest AMI for ${os_type} (owner: ${owner})..."
+    log_info "Finding latest AMI for ${os_type} (owner: ${owner}, arch: ${SELECTED_ARCHITECTURE})..."
     log_info "  Filter: ${name_filter}"
 
-    local ami_id
-    ami_id=$(aws ec2 describe-images \
+    local ami_id ami_json
+    ami_json=$(aws ec2 describe-images \
         --region "$AWS_REGION" \
         --owners "$owner" \
         --filters \
             "Name=name,Values=${name_filter}" \
             "Name=state,Values=available" \
-            "Name=architecture,Values=x86_64" \
+            "Name=architecture,Values=${SELECTED_ARCHITECTURE}" \
             "Name=virtualization-type,Values=hvm" \
             "Name=root-device-type,Values=ebs" \
-        --query "Images | sort_by(@, &CreationDate) | [-1].ImageId" \
-        --output text 2>/dev/null) || ami_id=""
+        --query "Images | sort_by(@, &CreationDate) | [-1].{ImageId:ImageId,RootDeviceName:RootDeviceName,Name:Name,CreationDate:CreationDate,Architecture:Architecture}" \
+        --output json 2>/dev/null) || ami_json=""
+
+    # Parse AMI details
+    ami_id=$(echo "$ami_json" | jq -r '.ImageId // ""' 2>/dev/null)
+    local ami_name ami_arch ami_root
+    ami_name=$(echo "$ami_json" | jq -r '.Name // "unknown"' 2>/dev/null)
+    ami_arch=$(echo "$ami_json" | jq -r '.Architecture // "unknown"' 2>/dev/null)
+    ami_root=$(echo "$ami_json" | jq -r '.RootDeviceName // ""' 2>/dev/null)
 
     if [[ -n "$ami_id" && "$ami_id" != "None" ]]; then
         SELECTED_AMI_ID="$ami_id"
+
+        # Determine root device name: AMI metadata → OS mapping → /dev/sda1 default
+        if [[ -n "$ami_root" && "$ami_root" != "null" ]]; then
+            SELECTED_ROOT_DEVICE="$ami_root"
+        else
+            SELECTED_ROOT_DEVICE="${OS_ROOT_DEVICES[$os_type]:-/dev/sda1}"
+        fi
+
         log_success "AMI: ${SELECTED_AMI_ID}"
+        log_info "  Name: ${ami_name}"
+        log_info "  Architecture: ${ami_arch}"
+        log_info "  Root device: ${SELECTED_ROOT_DEVICE}"
+        log_info "  Created: $(echo "$ami_json" | jq -r '.CreationDate // \"unknown\"' 2>/dev/null)"
         return 0
     fi
 
@@ -496,6 +606,55 @@ get_or_create_security_group() {
     echo "$sg_id"
 }
 
+# ─── AMI Validation ───────────────────────────────────────────────
+# Verifies the selected AMI exists, is available, and matches architecture.
+# Catches stale AMI IDs and architecture mismatches before run-instances.
+# Returns: 0 if AMI is launchable, non-zero otherwise
+# ───────────────────────────────────────────────────────────────────
+
+validate_ami() {
+    local ami_id="$1"
+    local expected_arch="${2:-x86_64}"
+
+    log_info "Validating AMI ${ami_id}..."
+
+    local ami_info
+    ami_info=$(aws ec2 describe-images \
+        --region "$AWS_REGION" \
+        --image-ids "$ami_id" \
+        --query "Images[0].{State:State,Architecture:Architecture,RootDeviceName:RootDeviceName,Name:Name}" \
+        --output json 2>&1) || {
+        log_error "AMI ${ami_id} not found or not accessible"
+        log_error "  ${ami_info}"
+        return 4
+    }
+
+    local state ami_arch ami_root
+    state=$(echo "$ami_info" | jq -r '.State // "unknown"' 2>/dev/null)
+    ami_arch=$(echo "$ami_info" | jq -r '.Architecture // ""' 2>/dev/null)
+    ami_root=$(echo "$ami_info" | jq -r '.RootDeviceName // ""' 2>/dev/null)
+
+    if [[ "$state" != "available" ]]; then
+        log_error "AMI ${ami_id} state is '${state}' — not launchable"
+        return 4
+    fi
+
+    if [[ -n "$ami_arch" && "$ami_arch" != "$expected_arch" ]]; then
+        log_error "AMI architecture mismatch: AMI is ${ami_arch}, instance requires ${expected_arch}"
+        log_info "  Cannot launch ${ami_arch} AMI on ${expected_arch} instance type"
+        return 4
+    fi
+
+    # Cache root device name from AMI if not already set
+    if [[ -n "$ami_root" && -z "${SELECTED_ROOT_DEVICE:-}" ]]; then
+        SELECTED_ROOT_DEVICE="$ami_root"
+        log_info "Root device from AMI: ${SELECTED_ROOT_DEVICE}"
+    fi
+
+    log_success "AMI validated: ${ami_id} (${state}, ${ami_arch})"
+    return 0
+}
+
 # -----------------------------------------------------------------------------
 # Function: create_instance
 # -----------------------------------------------------------------------------
@@ -512,11 +671,15 @@ create_instance() {
     get_ami || return $?
     log_info "AMI: ${SELECTED_AMI_ID}"
 
+    # Validate AMI is launchable before spending money
+    validate_ami "$SELECTED_AMI_ID" "$SELECTED_ARCHITECTURE" || return $?
+
     local sg_id
     sg_id=$(get_or_create_security_group)
     log_info "Security group: ${sg_id}"
 
     # Build create-instances command with arrays (§3.1.5)
+    local root_device="${SELECTED_ROOT_DEVICE:-/dev/sda1}"
     local cmd=(
         aws ec2 run-instances
         --region "$AWS_REGION"
@@ -524,7 +687,7 @@ create_instance() {
         --instance-type "$SELECTED_INSTANCE_TYPE"
         --key-name "$AWS_KEY_NAME"
         --security-group-ids "$sg_id"
-        --block-device-mappings "DeviceName=/dev/sda1,Ebs={VolumeSize=${VM_DISK},VolumeType=gp3}"
+        --block-device-mappings "DeviceName=${root_device},Ebs={VolumeSize=${VM_DISK},VolumeType=gp3}"
         --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${VM_NAME}}]"
         --query "Instances[0].InstanceId"
         --output text
@@ -678,8 +841,9 @@ output_result() {
         "VM_OS_TYPE:${VM_OS_TYPE}" \
         "VM_AMI_ID:${SELECTED_AMI_ID}" \
         "VM_INSTANCE_TYPE:${SELECTED_INSTANCE_TYPE}" \
+        "VM_ARCHITECTURE:${SELECTED_ARCHITECTURE}" \
         "COST:wall_time_s=${wall_time_s}" \
-        "RESOURCE:cpu_cores=${VM_CPU},ram_mb=${VM_RAM},disk_gb=${VM_DISK},instance_type=${SELECTED_INSTANCE_TYPE},region=${AWS_REGION}" \
+        "RESOURCE:cpu_cores=${VM_CPU},ram_mb=${VM_RAM},disk_gb=${VM_DISK},instance_type=${SELECTED_INSTANCE_TYPE},architecture=${SELECTED_ARCHITECTURE},region=${AWS_REGION}" \
         "WARNINGS:${LINUS_WARNINGS[*]:-none}"
 }
 
