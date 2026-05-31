@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: "Linus Deployment Specialist — single EC2 instance with automatic rollback"
+Description: "Linus Deployment Specialist -- single EC2 instance with automatic rollback"
 
 Parameters:
   InstanceType:
