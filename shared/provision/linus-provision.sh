@@ -8,9 +8,11 @@
 # Usage:
 #   PROVIDER=proxmox VM_OS_TYPE=ubuntu    ./linus-provision.sh
 #   PROVIDER=vast    VAST_GPU_NAME=RTX_3090 VAST_MODEL_REPO=... ./linus-provision.sh
+#   PROVIDER=aws     AWS_REGION=us-east-1   AWS_KEY_NAME=...   ./linus-provision.sh
 #
 # All env vars from the provider-specific driver scripts are supported.
-# See: proxmox-provision-and-bootstrap.sh, vast-provision-and-bootstrap.sh
+# See: proxmox-provision-and-bootstrap.sh, vast-provision-and-bootstrap.sh,
+#      aws-provision-and-bootstrap.sh
 #
 # Exit Codes: passthrough from provider driver
 # =============================================================================
@@ -26,9 +28,10 @@ readonly PROVIDER="${PROVIDER:-}"
 # ─── Validation ────────────────────────────────────────────────────
 
 if [[ -z "$PROVIDER" ]]; then
-    echo "ERROR: PROVIDER env var is required (proxmox | vast)" >&2
+    echo "ERROR: PROVIDER env var is required (proxmox | vast | aws)" >&2
     echo "Usage: PROVIDER=proxmox VM_OS_TYPE=ubuntu ./linus-provision.sh" >&2
     echo "       PROVIDER=vast VAST_GPU_NAME=RTX_3090 VAST_MODEL_REPO=... ./linus-provision.sh" >&2
+    echo "       PROVIDER=aws AWS_REGION=us-east-1 AWS_KEY_NAME=... ./linus-provision.sh" >&2
     exit 2
 fi
 
@@ -41,8 +44,11 @@ case "$PROVIDER" in
     vast)
         DRIVER="$SCRIPT_DIR/vast-provision-and-bootstrap.sh"
         ;;
+    aws)
+        DRIVER="$SCRIPT_DIR/aws-provision-and-bootstrap.sh"
+        ;;
     *)
-        echo "ERROR: Unknown provider: $PROVIDER (supported: proxmox, vast)" >&2
+        echo "ERROR: Unknown provider: $PROVIDER (supported: proxmox, vast, aws)" >&2
         exit 3
         ;;
 esac

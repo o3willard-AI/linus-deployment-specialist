@@ -815,6 +815,103 @@ wait_for_ssh() {
     return 6
 }
 
+# ─── VM Capability Verification ──────────────────────────────────
+# Quality gate — verifies the instance is actually usable for workloads.
+# Architecture-aware: x86 checks AVX2/SSE4.2, ARM checks NEON/ASIMD.
+# Returns: 0 on VERIFIED, 8 on DEGRADED (non-fatal — warns but continues)
+# ───────────────────────────────────────────────────────────────────
+
+verify_vm_capability() {
+    local vm_ip="$1"
+    local vm_user="$2"
+
+    log_step "5" "Verifying VM capability"
+
+    local ssh_args=(
+        -o BatchMode=yes
+        -o ConnectTimeout=5
+        -o StrictHostKeyChecking=no
+        -o UserKnownHostsFile=/dev/null
+        -o ServerAliveInterval=30
+    )
+    [[ -n "${VM_SSH_KEY:-}" ]] && ssh_args+=(-i "$VM_SSH_KEY")
+
+    local all_passed=true
+
+    # ─── Check 1: CPU features (architecture-aware) ────────────
+    log_info "Checking CPU features..."
+    if [[ "$SELECTED_ARCHITECTURE" == "arm64" ]]; then
+        # ARM/Graviton: check for NEON/ASIMD (aarch64 standard)
+        if ssh "${ssh_args[@]}" "${vm_user}@${vm_ip}" \
+            "grep -q -E ' neon| asimd| fp| crc32' /proc/cpuinfo" 2>/dev/null; then
+            log_info "  CPU supports NEON/ASIMD (ARM64) ✅"
+        else
+            log_warn "  CPU features minimal — ARM64 but NEON not confirmed"
+            all_passed=false
+        fi
+    else
+        # x86_64: check for AVX2/SSE4.2 (required for ML workloads)
+        if ssh "${ssh_args[@]}" "${vm_user}@${vm_ip}" \
+            "grep -q -E 'avx2|sse4_2' /proc/cpuinfo" 2>/dev/null; then
+            log_info "  CPU supports AVX2/SSE4.2 ✅"
+        else
+            log_warn "  CPU MISSING AVX2/SSE4.2 — ML workloads may crash"
+            log_warn "  Consider using a compute-optimized instance (c5/c6i/c7i)"
+            all_passed=false
+        fi
+    fi
+
+    # ─── Check 2: Disk space (>2 GB free) ────────────────────
+    log_info "Checking disk space..."
+    local disk_free
+    disk_free=$(ssh "${ssh_args[@]}" "${vm_user}@${vm_ip}" \
+        "df -BG / | awk 'NR==2 {print \$4}' | sed 's/G//'" 2>/dev/null) || disk_free=0
+    if [[ "$disk_free" -gt 2 ]]; then
+        log_info "  Disk: ${disk_free}GB free ✅"
+    else
+        log_warn "  Disk: ${disk_free}GB free (<2 GB) — may fail during package install"
+        all_passed=false
+    fi
+
+    # ─── Check 3: DNS resolution ─────────────────────────────
+    log_info "Checking DNS..."
+    if ssh "${ssh_args[@]}" "${vm_user}@${vm_ip}" \
+        "getent hosts amazon.com >/dev/null 2>&1" 2>/dev/null; then
+        log_info "  DNS working ✅"
+    else
+        # Try alternative DNS test (some AMIs block amazon.com)
+        if ssh "${ssh_args[@]}" "${vm_user}@${vm_ip}" \
+            "getent hosts archive.ubuntu.com >/dev/null 2>&1 || getent hosts google.com >/dev/null 2>&1" 2>/dev/null; then
+            log_info "  DNS working (alternate) ✅"
+        else
+            log_warn "  DNS not working — package managers will fail"
+            all_passed=false
+        fi
+    fi
+
+    # ─── Check 4: Python available ────────────────────────────
+    log_info "Checking Python..."
+    if ssh "${ssh_args[@]}" "${vm_user}@${vm_ip}" \
+        "which python3 >/dev/null 2>&1" 2>/dev/null; then
+        local py_ver
+        py_ver=$(ssh "${ssh_args[@]}" "${vm_user}@${vm_ip}" \
+            "python3 --version 2>&1" 2>/dev/null) || py_ver="unknown"
+        log_info "  Python: ${py_ver} ✅"
+    else
+        log_warn "  Python not installed — most workloads will fail"
+        all_passed=false
+    fi
+
+    if [[ "$all_passed" == "true" ]]; then
+        log_success "VM capability VERIFIED — ready for workload"
+        return 0
+    fi
+
+    _warn_tag "capability_degraded"
+    log_warn "VM capability DEGRADED — some checks failed (see above)"
+    return 8
+}
+
 # -----------------------------------------------------------------------------
 # Function: output_result
 # -----------------------------------------------------------------------------
@@ -861,6 +958,7 @@ main() {
     create_instance || exit $?
     wait_for_instance || exit $?
     wait_for_ssh || exit $?
+    verify_vm_capability "${VM_IP}" "${VM_SSH_USER}" || true   # Quality gate — warn but don't abort
     output_result
 
     # Disable cleanup trap on success
