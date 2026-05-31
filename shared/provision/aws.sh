@@ -180,6 +180,26 @@ declare -A INSTANCE_TYPES=(
     ["8-32768-arm"]="t4g.2xlarge"
 )
 
+# ─── Instance Pricing (on-demand, us-east-1, $/hour) ─────────────
+# Used to calculate LINUS_COST:estimated_usd from wall time.
+# Prices as of 2026-05. For other regions, multiply by region factor.
+declare -A INSTANCE_PRICES=(
+    # x86_64
+    [t3.nano]="0.0052"    [t3.micro]="0.0104"   [t3.small]="0.0208"
+    [t3.medium]="0.0416"  [t3.large]="0.0832"   [t3.xlarge]="0.1664"
+    [t3.2xlarge]="0.3328"
+    [t2.micro]="0.0116"   [t2.small]="0.023"    [t2.medium]="0.0464"
+    [m5.large]="0.096"    [m5.xlarge]="0.192"   [m5.2xlarge]="0.384"
+    [c5.large]="0.085"    [c5.xlarge]="0.17"    [c5.2xlarge]="0.34"
+    # arm64 (Graviton — ~20% cheaper than x86 equivalents)
+    [t4g.nano]="0.0042"   [t4g.micro]="0.0084"  [t4g.small]="0.0168"
+    [t4g.medium]="0.0336" [t4g.large]="0.0672"  [t4g.xlarge]="0.1344"
+    [t4g.2xlarge]="0.2688"
+    [m6g.large]="0.077"   [m6g.xlarge]="0.154"  [m6g.2xlarge]="0.308"
+    [c6g.large]="0.068"   [c6g.xlarge]="0.136"  [c6g.2xlarge]="0.272"
+    [m7g.large]="0.081"   [m7g.xlarge]="0.163"  [m7g.2xlarge]="0.326"
+)
+
 # Architecture detection from instance type prefix
 # t3.*, t2.*, m5.*, c5.* → x86_64
 # t4g.*, m6g.*, c6g.*, m7g.* → arm64
@@ -220,6 +240,8 @@ SELECTED_ROOT_DEVICE=""     # Root device name from AMI metadata
 CREATED_SECURITY_GROUP=""   # SG created by us (not user-supplied)
 LINUS_WARNINGS=()           # Accumulated non-fatal warning tags (§3.1.6)
 readonly PROVISION_START_TIME=$(date +%s)  # For LINUS_COST wall time tracking
+LAUNCH_TIME_S=0             # Seconds from start to instance 'running'
+SSH_READY_TIME_S=0          # Seconds from start to SSH available
 
 # ─── Warning Helper ───────────────────────────────────────────────
 # Appends a warning tag to the global accumulator.
@@ -254,6 +276,28 @@ cleanup_on_error() {
             log_error "Failed to terminate instance ${ALLOCATED_VM_ID}: ${term_result}"
         }
         log_info "Instance ${ALLOCATED_VM_ID} termination requested"
+
+        # Verify termination (poll up to 30s)
+        local verify_attempt=0
+        while [[ $verify_attempt -lt 6 ]]; do
+            sleep 5
+            local state_check
+            state_check=$(aws ec2 describe-instances \
+                --instance-ids "$ALLOCATED_VM_ID" \
+                --region "$AWS_REGION" \
+                --query "Reservations[0].Instances[0].State.Name" \
+                --output text 2>&1) || {
+                # Instance already gone (describe-instances returns error on terminated+purged)
+                log_success "Instance ${ALLOCATED_VM_ID} terminated and removed"
+                break
+            }
+            if [[ "$state_check" == "terminated" ]]; then
+                log_success "Instance ${ALLOCATED_VM_ID} terminated (verified)"
+                break
+            fi
+            verify_attempt=$((verify_attempt + 1))
+            log_info "  Waiting for termination... (${state_check:-unknown})"
+        done
     fi
     return $exit_code
 }
@@ -731,6 +775,7 @@ wait_for_instance() {
     }
 
     log_success "Instance is running"
+    LAUNCH_TIME_S=$(($(date +%s) - PROVISION_START_TIME))
 
     # Get public IP
     log_info "Retrieving public IP..."
@@ -797,7 +842,8 @@ wait_for_ssh() {
     while [[ $elapsed -lt $max_wait ]]; do
         local ssh_error
         ssh_error=$(ssh "${ssh_args[@]}" "${VM_SSH_USER}@${VM_IP}" "echo ok" 2>&1) && {
-            log_success "SSH is ready at ${VM_SSH_USER}@${VM_IP}"
+            SSH_READY_TIME_S=$(($(date +%s) - PROVISION_START_TIME))
+            log_success "SSH is ready at ${VM_SSH_USER}@${VM_IP} (${SSH_READY_TIME_S}s)"
             return 0
         }
 
@@ -920,9 +966,21 @@ verify_vm_capability() {
 # -----------------------------------------------------------------------------
 
 output_result() {
-    log_step "5" "Generating output"
+    log_step "6" "Generating output"
 
     local wall_time_s=$(($(date +%s) - PROVISION_START_TIME))
+
+    # Calculate estimated cost from instance pricing
+    local hourly_rate="${INSTANCE_PRICES[${SELECTED_INSTANCE_TYPE}]:-0}"
+    local estimated_usd="0.0000"
+    if [[ "$hourly_rate" != "0" && -n "$hourly_rate" ]]; then
+        estimated_usd=$(python3 -c "
+runtime_s = ${wall_time_s}
+rate_hr = ${hourly_rate}
+cost = (runtime_s / 3600.0) * rate_hr
+print(f'{cost:.6f}')
+" 2>/dev/null) || estimated_usd="unknown"
+    fi
 
     # Structured output for parsing (LINUS_RESULT contract)
     linus_success \
@@ -939,7 +997,7 @@ output_result() {
         "VM_AMI_ID:${SELECTED_AMI_ID}" \
         "VM_INSTANCE_TYPE:${SELECTED_INSTANCE_TYPE}" \
         "VM_ARCHITECTURE:${SELECTED_ARCHITECTURE}" \
-        "COST:wall_time_s=${wall_time_s}" \
+        "COST:wall_time_s=${wall_time_s},launch_time_s=${LAUNCH_TIME_S},ssh_ready_time_s=${SSH_READY_TIME_S},instance_type=${SELECTED_INSTANCE_TYPE},hourly_rate_usd=${hourly_rate},estimated_usd=${estimated_usd}" \
         "RESOURCE:cpu_cores=${VM_CPU},ram_mb=${VM_RAM},disk_gb=${VM_DISK},instance_type=${SELECTED_INSTANCE_TYPE},architecture=${SELECTED_ARCHITECTURE},region=${AWS_REGION}" \
         "WARNINGS:${LINUS_WARNINGS[*]:-none}"
 }
