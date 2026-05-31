@@ -1,0 +1,82 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Linus Deployment Specialist — single EC2 instance with automatic rollback"
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: t3.small
+    Description: EC2 instance type
+  AmiId:
+    Type: String
+    Default: ami-0fbcf351e82d18381
+    Description: AMI ID (override via script with explicit AMI)
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 key pair for SSH access
+  SubnetId:
+    Type: String
+    Default: ""
+    Description: VPC subnet ID (empty = use default VPC subnet)
+  VolumeSize:
+    Type: Number
+    Default: 20
+    MinValue: 8
+    MaxValue: 500
+    Description: Root volume size in GB
+  InstanceName:
+    Type: String
+    Default: linus-cfn-vm
+    Description: Name tag for the instance
+
+Conditions:
+  HasSubnet: !Not [!Equals [!Ref SubnetId, ""]]
+
+Resources:
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Linus CFN - SSH access
+      GroupName: !Sub linus-cfn-sg-${AWS::StackName}
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub linus-cfn-sg-${AWS::StackName}
+
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref AmiId
+      KeyName: !Ref KeyName
+      SecurityGroupIds:
+        - !Ref InstanceSecurityGroup
+      SubnetId: !If [HasSubnet, !Ref SubnetId, !Ref AWS::NoValue]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: !Ref VolumeSize
+            VolumeType: gp3
+      Tags:
+        - Key: Name
+          Value: !Ref InstanceName
+
+Outputs:
+  InstanceId:
+    Description: EC2 instance ID
+    Value: !Ref EC2Instance
+  PublicIp:
+    Description: Public IP address
+    Value: !GetAtt EC2Instance.PublicIp
+  PrivateIp:
+    Description: Private IP address
+    Value: !GetAtt EC2Instance.PrivateIp
+  AvailabilityZone:
+    Description: Availability zone
+    Value: !GetAtt EC2Instance.AvailabilityZone
+  SecurityGroupId:
+    Description: Security group ID
+    Value: !Ref InstanceSecurityGroup

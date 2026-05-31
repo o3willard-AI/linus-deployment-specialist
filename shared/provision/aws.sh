@@ -11,6 +11,10 @@
 #   AWS_REGION          - AWS region (default: us-east-1)
 #   AWS_ACCESS_KEY_ID   - AWS access key (auto-discovered from ~/.hermes/secrets/)
 #   AWS_SECRET_ACCESS_KEY- AWS secret key (auto-discovered from ~/.hermes/secrets/)
+#   OR (alternate auth methods — any ONE of these):
+#     AWS_PROFILE       - Named profile in ~/.aws/config (supports SSO, AssumeRole)
+#     AWS_ROLE_ARN      - IAM role ARN to assume (uses sts assume-role)
+#     Instance Profile  - Running on EC2? Uses attached IAM role automatically
 #   AWS_KEY_NAME        - EC2 key pair name (required)
 #   VM_OS_TYPE          - OS to provision: ubuntu, almalinux, debian, rocky (default: ubuntu)
 #   VM_NAME             - Instance name tag (optional)
@@ -61,6 +65,11 @@ source_lib "logging.sh" "validation.sh" "ensure-dns.sh"
 # -----------------------------------------------------------------------------
 # Credential auto-discovery — source from known secret files before env vars
 # -----------------------------------------------------------------------------
+# ─── Credential Auto-Discovery (4 auth methods) ──────────────────
+# Priority: env vars → ~/.hermes/secrets/ → ~/.aws/config (SSO profile)
+#          → AssumeRole → Instance Profile (automatic on EC2)
+# ───────────────────────────────────────────────────────────────────
+
 _linus_auto_discover_credentials() {
     local secret_dirs=(
         "$HOME/.hermes/secrets"
@@ -72,6 +81,7 @@ _linus_auto_discover_credentials() {
         "amazon"
     )
 
+    # 1. Static keys from secrets files
     for dir in "${secret_dirs[@]}"; do
         for fname in "${cred_files[@]}"; do
             local fpath="${dir}/${fname}"
@@ -85,11 +95,108 @@ _linus_auto_discover_credentials() {
                         AWS_SECRET_ACCESS_KEY)   : "${AWS_SECRET_ACCESS_KEY:=$value}" ;;
                         AWS_REGION)              : "${AWS_REGION:=$value}" ;;
                         AWS_KEY_NAME)            : "${AWS_KEY_NAME:=$value}" ;;
+                        AWS_PROFILE)             : "${AWS_PROFILE:=$value}" ;;
+                        AWS_ROLE_ARN)            : "${AWS_ROLE_ARN:=$value}" ;;
                     esac
                 done < "$fpath"
             fi
         done
     done
+}
+
+# ─── Auth Resolution ───────────────────────────────────────────────
+# Resolves AWS credentials using the first available method:
+#   1. Static keys (AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY)
+#   2. SSO profile (AWS_PROFILE — checks sso login session expiry)
+#   3. IAM Role (AWS_ROLE_ARN — calls sts assume-role)
+#   4. Instance Profile (automatic on EC2 — no config needed)
+#
+# Exports resolved credentials to environment if needed (AssumeRole).
+# Returns: 0 if any method works, non-zero if all fail.
+# ───────────────────────────────────────────────────────────────────
+
+_linus_resolve_auth() {
+    # Method 1: Static keys (already exported or from secrets)
+    if [[ -n "${AWS_ACCESS_KEY_ID:-}" && -n "${AWS_SECRET_ACCESS_KEY:-}" ]]; then
+        export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+        log_info "Auth: static IAM keys"
+        return 0
+    fi
+
+    # Method 2: SSO profile (AWS_PROFILE)
+    if [[ -n "${AWS_PROFILE:-}" ]]; then
+        log_info "Auth: SSO profile '${AWS_PROFILE}'"
+        # Check if SSO session is still valid
+        local sso_check
+        sso_check=$(aws sts get-caller-identity --profile "$AWS_PROFILE" 2>&1) && {
+            local sso_account
+            sso_account=$(echo "$sso_check" | jq -r '.Account // "unknown"' 2>/dev/null)
+            log_info "  SSO session valid (account: ${sso_account})"
+            return 0
+        }
+        # SSO session expired — instruct user
+        log_warn "SSO session expired or invalid for profile '${AWS_PROFILE}'"
+        log_info "  Run: aws sso login --profile ${AWS_PROFILE}"
+        log_info "  Then retry this script."
+        log_info ""
+        log_info "  To configure SSO for the first time:"
+        log_info "    aws configure sso"
+        log_info "    (follow the prompts for start URL, region, account, role)"
+        return 3
+    fi
+
+    # Method 3: IAM Role assumption (AWS_ROLE_ARN)
+    if [[ -n "${AWS_ROLE_ARN:-}" ]]; then
+        log_info "Auth: assuming IAM role '${AWS_ROLE_ARN}'"
+        local role_session
+        role_session=$(aws sts assume-role \
+            --role-arn "$AWS_ROLE_ARN" \
+            --role-session-name "linus-provision-$(date +%s)" \
+            --query 'Credentials.{AccessKeyId:AccessKeyId,SecretAccessKey:SecretAccessKey,SessionToken:SessionToken}' \
+            --output json 2>&1) || {
+            log_error "Failed to assume role: ${AWS_ROLE_ARN}"
+            log_error "  ${role_session}"
+            log_info "  Ensure your base credentials have sts:AssumeRole permission."
+            return 3
+        }
+        export AWS_ACCESS_KEY_ID=$(echo "$role_session" | jq -r '.AccessKeyId')
+        export AWS_SECRET_ACCESS_KEY=$(echo "$role_session" | jq -r '.SecretAccessKey')
+        export AWS_SESSION_TOKEN=$(echo "$role_session" | jq -r '.SessionToken')
+        local role_account
+        role_account=$(echo "$AWS_ROLE_ARN" | grep -oP '[0-9]{12}' || echo "unknown")
+        log_success "  Assumed role (account: ${role_account})"
+        return 0
+    fi
+
+    # Method 4: Instance Profile (running on EC2)
+    # Check if we can reach the IMDS (Instance Metadata Service)
+    local imds_token
+    imds_token=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+        -H "X-aws-ec2-metadata-token-ttl-seconds: 10" 2>/dev/null) || imds_token=""
+    if [[ -n "$imds_token" ]]; then
+        local imds_account
+        imds_account=$(curl -s -H "X-aws-ec2-metadata-token: $imds_token" \
+            "http://169.254.169.254/latest/dynamic/instance-identity/document" 2>/dev/null \
+            | jq -r '.accountId // ""' 2>/dev/null) || imds_account=""
+        if [[ -n "$imds_account" ]]; then
+            log_info "Auth: EC2 instance profile (account: ${imds_account})"
+            return 0
+        fi
+    fi
+
+    # Nothing worked
+    log_error "No AWS credentials found."
+    log_info ""
+    log_info "  Set ONE of the following:"
+    log_info "    1. AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY (static keys)"
+    log_info "    2. AWS_PROFILE (SSO profile — run 'aws sso login --profile NAME')"
+    log_info "    3. AWS_ROLE_ARN (IAM role — uses base credentials to assume)"
+    log_info "    4. Run on EC2 (instance profile auto-detected)"
+    log_info ""
+    log_info "  Or save static keys to ~/.hermes/secrets/aws-credentials:"
+    log_info "    AWS_ACCESS_KEY_ID=AKIA...    "
+    log_info "    AWS_SECRET_ACCESS_KEY=..."
+    return 3
 }
 
 _linus_auto_discover_credentials
@@ -315,21 +422,8 @@ validate_environment() {
     # Check AWS CLI is installed
     check_dependencies aws jq || return 2
 
-    # Check AWS credentials are configured (env vars or ~/.aws/credentials)
-    if [[ -n "${AWS_ACCESS_KEY_ID:-}" && -n "${AWS_SECRET_ACCESS_KEY:-}" ]]; then
-        export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
-    fi
-
-    local caller_identity
-    caller_identity=$(aws sts get-caller-identity --region "$AWS_REGION" 2>&1) || {
-        log_error "AWS credentials not configured or invalid"
-        log_error "  aws sts: ${caller_identity}"
-        log_info "  Set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY, or run 'aws configure'"
-        return 3
-    }
-    local account_id
-    account_id=$(echo "$caller_identity" | jq -r '.Account // "unknown"')
-    log_info "AWS account: ${account_id}"
+    # Resolve credentials (4 methods: static, SSO, AssumeRole, Instance Profile)
+    _linus_resolve_auth || return $?
 
     # Validate AWS_KEY_NAME is provided
     if [[ -z "$AWS_KEY_NAME" ]]; then
