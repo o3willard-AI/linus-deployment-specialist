@@ -56,10 +56,11 @@ VM_NAME="${VM_NAME:-}"
 # Bootstrap settings
 BOOTSTRAP_PACKAGES="${BOOTSTRAP_PACKAGES:-}"
 BOOTSTRAP_REPOS="${BOOTSTRAP_REPOS:-}"
+BOOTSTRAP_TYPE="${BOOTSTRAP_TYPE:-server}"
 
 # Paths
 readonly PROVISION_SCRIPT="$SCRIPT_DIR/proxmox.sh"
-readonly BOOTSTRAP_SCRIPT="$SCRIPT_DIR/../bootstrap/bootstrap-vm.sh"
+readonly BOOTSTRAP_SCRIPT="${BOOTSTRAP_SCRIPT:-$SCRIPT_DIR/../bootstrap/bootstrap-vm.sh}"
 
 # ─── Validation ────────────────────────────────────────────────────
 
@@ -96,6 +97,7 @@ parse_linus_result() {
             VM_SSH_KEY)      PARSED_VM_SSH_KEY="$val" ;;
             VM_NAME)         PARSED_VM_NAME="$val" ;;
             VM_OS_TYPE)      PARSED_VM_OS_TYPE="$val" ;;
+            VM_TYPE)         PARSED_VM_TYPE="$val" ;;
             VM_TEMPLATE_ID)  PARSED_VM_TEMPLATE_ID="$val" ;;
             COST)            PARSED_COST="$val" ;;
         esac
@@ -115,6 +117,7 @@ run_provision() {
     provision_output=$(PROXMOX_HOST="$PROXMOX_HOST" \
         PROXMOX_NODE="$PROXMOX_NODE" \
         VM_OS_TYPE="$VM_OS_TYPE" \
+        VM_TYPE="$BOOTSTRAP_TYPE" \
         VM_TEMPLATE_ID="$VM_TEMPLATE_ID" \
         VM_TEMPLATE_FALLBACKS="$VM_TEMPLATE_FALLBACKS" \
         VM_CPU="$VM_CPU" \
@@ -163,8 +166,9 @@ run_bootstrap() {
     
     log_info "Bootstrapping VM at ${vm_user}@${PARSED_VM_IP} (OS: ${os_type})..."
 
-    # Skip bootstrap if no packages or repos specified
-    if [[ -z "$BOOTSTRAP_PACKAGES" && -z "$BOOTSTRAP_REPOS" ]]; then
+    # Skip bootstrap if no packages, repos, AND not desktop type
+    # Desktop bootstrap installs its own package list — doesn't need BOOTSTRAP_PACKAGES
+    if [[ -z "$BOOTSTRAP_PACKAGES" && -z "$BOOTSTRAP_REPOS" && "$BOOTSTRAP_TYPE" != "desktop" ]]; then
         log_info "No bootstrap packages or repos specified — skipping"
         return 0
     fi
@@ -175,6 +179,7 @@ run_bootstrap() {
         VM_USER="$vm_user" \
         BOOTSTRAP_PACKAGES="$BOOTSTRAP_PACKAGES" \
         BOOTSTRAP_REPOS="$BOOTSTRAP_REPOS" \
+        BOOTSTRAP_TYPE="$BOOTSTRAP_TYPE" \
         stdbuf -oL -eL bash "$bootstrap_script" 2>&1) || bootstrap_ec=$?
 
     echo "$bootstrap_output"
@@ -206,6 +211,7 @@ print(f'{m}m {s}s')
     log_info "  VM IP:         ${PARSED_VM_IP:-N/A}"
     log_info "  SSH:           ${PARSED_VM_USER:-ubuntu}@${PARSED_VM_IP:-N/A}"
     log_info "  OS type:       ${PARSED_VM_OS_TYPE:-${VM_OS_TYPE}}"
+    log_info "  VM type:       ${PARSED_VM_TYPE:-${BOOTSTRAP_TYPE}}"
     log_info "  Template:      ${PARSED_VM_TEMPLATE_ID:-N/A}"
     log_info "  Spec:          ${VM_CPU} CPU / ${VM_RAM}MB RAM / ${VM_DISK}GB disk"
 
@@ -225,6 +231,7 @@ print(f'{m}m {s}s')
     echo "LINUS_VM_SSH_KEY:${PARSED_VM_SSH_KEY:-}"
     echo "LINUS_VM_NAME:${PARSED_VM_NAME:-}"
     echo "LINUS_VM_OS_TYPE:${PARSED_VM_OS_TYPE:-${VM_OS_TYPE}}"
+    echo "LINUS_VM_TYPE:${PARSED_VM_TYPE:-${BOOTSTRAP_TYPE}}"
     echo "LINUS_VM_TEMPLATE_ID:${PARSED_VM_TEMPLATE_ID:-}"
     echo "LINUS_COST:wall_time_s=${total_seconds}"
     if [[ -n "${PARSED_COST:-}" ]]; then

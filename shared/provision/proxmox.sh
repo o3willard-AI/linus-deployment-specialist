@@ -105,6 +105,16 @@ readonly VM_NAME="${VM_NAME:-}"
 readonly VM_CPU="${VM_CPU:-2}"
 readonly VM_RAM="${VM_RAM:-2048}"
 readonly VM_DISK="${VM_DISK:-20}"
+readonly VM_TYPE="${VM_TYPE:-server}"
+
+# VM_TYPE=desktop: raise defaults and apply GPU/display config
+# Safe: only changes vars still at their default values — user overrides respected.
+if [[ "$VM_TYPE" == "desktop" ]]; then
+    # Raise CPU/RAM/DISK defaults for desktop workload if user didn't override
+    [[ "${VM_CPU}" == "2" ]] && VM_CPU="4"
+    [[ "${VM_RAM}" == "2048" ]] && VM_RAM="8192"
+    [[ "${VM_DISK}" == "20" ]] && VM_DISK="64"
+fi
 
 # ─── ISO Bootstrap Configuration ─────────────────────────────────
 # When no templates exist, the deployment specialist can download cloud
@@ -1299,6 +1309,86 @@ configure_network_for_os_type() {
 }
 
 # -----------------------------------------------------------------------------
+# Function: inject_desktop_cloudinit
+# -----------------------------------------------------------------------------
+# Generates a #cloud-config YAML snippet with the desktop package list
+# (ubuntu-desktop, xdotool, etc.) and uploads it to Proxmox's snippets
+# storage via the API. Sets cicustom so cloud-init installs everything
+# during first boot — SSH comes up with the desktop already ready.
+#
+# Non-fatal: warns on failure but doesn't abort provisioning.
+# Falls back to bootstrap-time install if upload fails.
+# -----------------------------------------------------------------------------
+
+inject_desktop_cloudinit() {
+    local vm_id="$1"
+    local snippet_name="cloud-config-desktop-${vm_id}.yaml"
+    local tmp_yaml
+    tmp_yaml=$(mktemp) || { log_warn "Cannot create temp file for cloud-config"; return 1; }
+    
+    # Generate cloud-config YAML
+    cat > "$tmp_yaml" << 'CLOUDCONFIG_EOF'
+#cloud-config
+package_update: true
+package_upgrade: true
+packages:
+  - ubuntu-desktop
+  - xdotool
+  - x11-utils
+  - net-tools
+  - curl
+  - git
+  - build-essential
+  - python3-pip
+  - openjdk-17-jre-headless
+  - at-spi2-core
+  - accerciser
+  - qemu-guest-agent
+write_files:
+  - path: /etc/gdm3/custom.conf
+    content: |
+      [daemon]
+      WaylandEnable=false
+    owner: root:root
+    permissions: '0644'
+runcmd:
+  - systemctl set-default graphical.target
+CLOUDCONFIG_EOF
+
+    log_info "Uploading cloud-config snippet to Proxmox storage..."
+    
+    # Upload to Proxmox snippets storage via multipart form upload
+    local upload_code
+    upload_code=$(curl -sk --fail -X POST \
+        -H "Authorization: PVEAPIToken=${PROXMOX_USER}!${PROXMOX_TOKEN_ID}=${PROXMOX_TOKEN_SECRET}" \
+        -F "content=snippets" \
+        -F "filename=${snippet_name}" \
+        -F "file=@${tmp_yaml}" \
+        -w "%{http_code}" \
+        -o /dev/null \
+        "https://${PROXMOX_HOST}:8006/api2/json/nodes/${PROXMOX_NODE}/storage/local/upload" 2>/dev/null) || upload_code=0
+    
+    rm -f "$tmp_yaml"
+    
+    if [[ "$upload_code" != "200" ]]; then
+        log_warn "Failed to upload cloud-config snippet (HTTP ${upload_code}) — will install desktop via bootstrap instead"
+        _warn_tag "cloudinit_upload_failed"
+        return 1
+    fi
+    
+    # Set cicustom to reference the uploaded snippet
+    if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
+        --data-raw "{\"cicustom\":\"user=local:snippets/${snippet_name}\"}" >/dev/null 2>&1; then
+        log_warn "Failed to set cicustom (non-fatal) — will install desktop via bootstrap instead"
+        _warn_tag "cicustom_failed"
+        return 1
+    fi
+    
+    log_success "Cloud-init user-data injected — desktop will install during first boot"
+    return 0
+}
+
+# -----------------------------------------------------------------------------
 # Function: configure_vm
 # -----------------------------------------------------------------------------
 # Configures VM resources (CPU, RAM, disk)
@@ -1327,6 +1417,22 @@ configure_vm() {
         --data-raw "{\"cores\":${VM_CPU},\"memory\":${VM_RAM}}" >/dev/null 2>&1; then
         log_error "Failed to set CPU/RAM"
         return 5
+    fi
+
+    # VM_TYPE=desktop: apply VirtIO-GPU, disable ballooning, set ostype
+    if [[ "$VM_TYPE" == "desktop" ]]; then
+        log_info "Desktop VM — applying VirtIO-GPU (128MB VRAM), ostype=l26, balloon=0..."
+        if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
+            --data-raw '{"vga":"virtio,memory=128","ostype":"l26","balloon":0}' >/dev/null 2>&1; then
+            log_warn "Failed to set desktop GPU/display config (non-fatal)"
+            _warn_tag "desktop_vga_failed"
+        fi
+
+        # Inject cloud-init user-data to pre-install desktop during first boot.
+        # This uploads a #cloud-config snippet with packages: [ubuntu-desktop, ...]
+        # so the heavy install (~1200 pkgs, ~7 GB) happens during cloud-init,
+        # before SSH comes up. Bootstrap only needs to verify.
+        inject_desktop_cloudinit "$vm_id"
     fi
 
     # PITFALL 8: Disk resize uses /resize, not /config
@@ -1700,6 +1806,7 @@ output_result() {
         "VM_DISK:${VM_DISK}" \
         "VM_NODE:${PROXMOX_NODE}" \
         "VM_OS_TYPE:${VM_OS_TYPE}" \
+        "VM_TYPE:${VM_TYPE}" \
         "VM_TEMPLATE_ID:${SELECTED_TEMPLATE_ID}" \
         "COST:wall_time_s=${wall_time_s}" \
         "RESOURCE:cpu_cores=${VM_CPU},ram_mb=${VM_RAM},disk_gb=${VM_DISK},host_free_ram_mb=${PROXMOX_FREE_RAM_MB:-0},host_free_disk_gb=${PROXMOX_FREE_DISK_GB:-0}" \
