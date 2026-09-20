@@ -78,19 +78,57 @@ log_step() {
     echo "$msg" >> "$LINUS_LOG_FILE"
 }
 
-# -----------------------------------------------------------------------------
-# Structured Output (for MCP/Agent parsing)
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# Operator (Accountable Human) Resolution — RAE Level 0
+# ----------------------------------------------------------------------------
 
-# Output a structured result that agents can parse
+# Resolve the accountable operator identifier.
+# Priority: LINUS_OPERATOR_ID > LINUS_OPERATOR_NAME > $USER > whoami
+# The operator is self-declared; no verification is performed (RAE L0).
+# Never carries credential material.
+resolve_operator() {
+    if [[ -n "${LINUS_OPERATOR_ID:-}" ]]; then
+        printf '%s' "${LINUS_OPERATOR_ID}"
+    elif [[ -n "${LINUS_OPERATOR_NAME:-}" ]]; then
+        printf '%s' "${LINUS_OPERATOR_NAME}"
+    elif [[ -n "${USER:-}" ]]; then
+        printf '%s' "${USER}"
+    else
+        whoami 2>/dev/null || printf '%s' "unknown"
+    fi
+}
+
+# Resolve the accountable operator's human-readable name for log messages.
+# Priority: LINUS_OPERATOR_NAME > LINUS_OPERATOR_ID > $USER > whoami
+resolve_operator_name() {
+    if [[ -n "${LINUS_OPERATOR_NAME:-}" ]]; then
+        printf '%s' "${LINUS_OPERATOR_NAME}"
+    elif [[ -n "${LINUS_OPERATOR_ID:-}" ]]; then
+        printf '%s' "${LINUS_OPERATOR_ID}"
+    elif [[ -n "${USER:-}" ]]; then
+        printf '%s' "${USER}"
+    else
+        whoami 2>/dev/null || printf '%s' "unknown"
+    fi
+}
+
+# ----------------------------------------------------------------------------
+# Structured Output (for MCP/Agent parsing)
+# ----------------------------------------------------------------------------
+
+# Output a structured result that agents can parse.
+# An OPERATOR:<id> pair is appended automatically for RAE accountability.
 # Usage: linus_result SUCCESS "VM_ID:123" "VM_IP:192.168.1.50"
 linus_result() {
     local status="$1"
     shift
+    local operator
+    operator="$(resolve_operator)"
     echo "LINUS_RESULT:${status}"
     for pair in "$@"; do
         echo "LINUS_${pair}"
     done
+    echo "LINUS_OPERATOR:${operator}"
 }
 
 # Output success result with key-value pairs

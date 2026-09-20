@@ -73,7 +73,9 @@ Comprehensive testing capabilities for AI agent QA validation across multiple en
 **Environment Variables:**
 - `PROVIDER` - VM provider (proxmox/aws/qemu)
 - `VM_IDENTIFIER` - VM ID, instance ID, or name
-- `FORCE_DESTROY` - Skip confirmation (default: false)
+- `FORCE` - Skip confirmation (default: false)
+- `LINUS_OPERATOR_ID` - Accountable operator identifier (RAE, default: $USER)
+- `LINUS_OPERATOR_NAME` - Human-readable operator name for log messages
 
 #### 5.4: Complete QA Workflow (`workflows/qa-testing.sh`)
 **Purpose:** End-to-end testing pipeline: provision → deploy → test → destroy → report

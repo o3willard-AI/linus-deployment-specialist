@@ -12,8 +12,10 @@
 #   VM_IDENTIFIER - Identifier for the VM to destroy
 #
 # Optional Environment Variables:
-#   FORCE        - If true, force destruction without confirmation (default: false)
-#   DRY_RUN      - If true, show what would be done without executing (default: false)
+#   FORCE              - If true, force destruction without confirmation (default: false)
+#   DRY_RUN            - If true, show what would be done without executing (default: false)
+#   LINUS_OPERATOR_ID  - Accountable operator identifier for RAE (default: $USER)
+#   LINUS_OPERATOR_NAME- Human-readable operator name for log messages
 #
 # Usage:
 #   ./destroy.sh
@@ -35,7 +37,7 @@ IFS=$'\n\t'
 # -----------------------------------------------------------------------------
 
 readonly SCRIPT_NAME="$(basename "$0")"
-readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
 # Source the unified library path resolver
 source "$SCRIPT_DIR/../lib/paths.sh" || exit 1
@@ -64,8 +66,10 @@ Required Environment Variables:
   VM_IDENTIFIER  - Identifier for the VM to destroy
 
 Optional Environment Variables:
-  FORCE          - If true, force destruction without confirmation (default: false)
-  DRY_RUN        - If true, show what would be done without executing (default: false)
+  FORCE              - If true, force destruction without confirmation (default: false)
+  DRY_RUN            - If true, show what would be done without executing (default: false)
+  LINUS_OPERATOR_ID  - Accountable operator identifier for RAE (default: $USER)
+  LINUS_OPERATOR_NAME- Human-readable operator name for log messages
 
 Usage:
   export PROVIDER="proxmox"
@@ -119,9 +123,14 @@ function validate_inputs() {
 function confirm_destruction() {
     local provider="$1"
     local vm_id="$2"
+    local operator
+    operator="$(resolve_operator)"
+    local operator_name
+    operator_name="$(resolve_operator_name)"
     
     if [[ "${FORCE}" == "true" ]]; then
         log_info "Force destruction enabled, skipping confirmation"
+        log_warn "Operator ${operator_name} (${operator}) forced destruction of VM ${vm_id} on ${provider} without confirmation"
         return 0
     fi
     
@@ -141,6 +150,7 @@ function confirm_destruction() {
         return 1
     fi
     
+    log_info "Operator ${operator_name} (${operator}) confirmed VM destruction of ${vm_id} on ${provider}"
     return 0
 }
 
@@ -373,15 +383,13 @@ main() {
     # Validate prerequisites
     validate_inputs || {
         local ret=$?
-        echo "LINUS_RESULT:FAILURE"
-        echo "LINUS_ERROR:Input validation failed"
+        linus_failure "Input validation failed"
         return $ret
     }
     
     # Confirm destruction
     confirm_destruction "${PROVIDER}" "${VM_IDENTIFIER}" || {
-        echo "LINUS_RESULT:FAILURE"
-        echo "LINUS_ERROR:VM destruction cancelled by user"
+        linus_failure "VM destruction cancelled by user"
         return 1
     }
     
@@ -389,22 +397,19 @@ main() {
     case "${PROVIDER}" in
         proxmox)
             destroy_proxmox_vm "${VM_IDENTIFIER}" || {
-                echo "LINUS_RESULT:FAILURE"
-                echo "LINUS_ERROR:Proxmox VM destruction failed"
+                linus_failure "Proxmox VM destruction failed"
                 return 5
             }
             ;;
         aws)
             destroy_aws_vm "${VM_IDENTIFIER}" || {
-                echo "LINUS_RESULT:FAILURE"
-                echo "LINUS_ERROR:AWS VM destruction failed"
+                linus_failure "AWS VM destruction failed"
                 return 5
             }
             ;;
         qemu)
             destroy_qemu_vm "${VM_IDENTIFIER}" || {
-                echo "LINUS_RESULT:FAILURE"
-                echo "LINUS_ERROR:QEMU VM destruction failed"
+                linus_failure "QEMU VM destruction failed"
                 return 5
             }
             ;;
@@ -412,25 +417,18 @@ main() {
     
     # Cleanup resources
     cleanup_resources "${PROVIDER}" "${VM_IDENTIFIER}" || {
-        echo "LINUS_RESULT:FAILURE"
-        echo "LINUS_ERROR:Resource cleanup failed"
+        linus_failure "Resource cleanup failed"
         return 5
     }
     
     # Verify destruction
     verify_destruction "${PROVIDER}" "${VM_IDENTIFIER}" || {
-        echo "LINUS_RESULT:FAILURE"
-        echo "LINUS_ERROR:Destruction verification failed"
+        linus_failure "Destruction verification failed"
         return 5
     }
     
     # Output success markers for agent parsing
-    echo "LINUS_RESULT:SUCCESS"
-    echo "LINUS_DESTROY_RESULT:SUCCESS"
-    echo "LINUS_DESTROY_PROVIDER:${PROVIDER}"
-    echo "LINUS_DESTROY_VM_ID:${VM_IDENTIFIER}"
-    echo "LINUS_SCRIPT:$SCRIPT_NAME"
-    echo "LINUS_TIMESTAMP:$(date +%s)"
+    linus_success "DESTROY_RESULT:SUCCESS" "DESTROY_PROVIDER:${PROVIDER}" "DESTROY_VM_ID:${VM_IDENTIFIER}" "SCRIPT:$SCRIPT_NAME" "TIMESTAMP:$(date +%s)"
     
     log_info "$SCRIPT_NAME completed successfully"
     return 0
