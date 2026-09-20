@@ -42,6 +42,7 @@ scripts=(
     "shared/lib/mcp-helpers.sh"
     "shared/lib/noninteractive.sh"
     "shared/lib/tmux-helper.sh"
+    "tests/unit/test-unit-operator.sh"
     "workflows/qa-testing.sh"
     "scripts/generate-report.sh"
     "examples/pre-bootstrap-snapshot-example.sh"
