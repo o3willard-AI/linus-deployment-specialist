@@ -30,6 +30,19 @@ VM_RAM=4096             # RAM in MB (default: 4096)
 VM_DISK=20              # Disk size in GB (default: 20)
 ```
 
+### Accountable Operator Variables (RAE)
+
+These variables identify the accountable human for provision/destroy actions,
+satisfying RAE Level 0 (self-declared, no verification). When unset, the
+operator defaults to the current `$USER` (or `whoami`).
+
+```bash
+LINUS_OPERATOR_ID="mike"       # Operator identifier emitted in LINUS_OPERATOR:
+LINUS_OPERATOR_NAME="Mike S."  # Human-readable name for log messages
+```
+
+Both are optional and carry no credential material.
+
 ### Provider-Specific Variables
 
 | Variable | Provider | Required | Default | Description |

@@ -54,6 +54,16 @@ If you are an AI agent (Claude, Gemini, etc.) tasked with provisioning Linux VMs
 
 All agents use the same underlying ssh-mcp protocol with standardized configuration templates.
 
+> **Accountability (RAE).** Linus records a declared **Registered Accountable
+> Entity (RAE) at L0 (declared, unverified)** — the human operator who deploys
+> and runs it. Every provision and destroy action (including `FORCE=true`
+> destruction, which skips the confirmation prompt) is attributable to that
+> operator, never to the agent driving it. The operator is self-declared
+> (`LINUS_OPERATOR_ID` / `LINUS_OPERATOR_NAME`, defaulting to `$USER`) and not
+> verified, hence L0. See the [RAE specification](https://github.com/o3willard-AI/RAE),
+> [docs/accountability.md](docs/accountability.md), and
+> [RAE-CONFORMANCE.md](RAE-CONFORMANCE.md).
+
 ### Git Credential Manager Integration
 
 For enhanced security, the Linus Deployment Specialist now supports Git Credential Manager (GCM) for secure credential handling:
