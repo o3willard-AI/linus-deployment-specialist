@@ -32,6 +32,8 @@
 #   4 - Proxmox node offline
 #   5 - VM creation failed
 #   6 - Network/SSH timeout
+#   7 - SSH credentials required (PROXMOX_SSH_PASS not set for template bootstrap)
+#   9 - Template bootstrap needed (human intervention: provide SSH credentials)
 #
 # =============================================================================
 
@@ -96,16 +98,64 @@ readonly PROXMOX_NODE="${PROXMOX_NODE:-moxy}"
 readonly PROXMOX_STORAGE="${PROXMOX_STORAGE:-local-lvm}"
 readonly PROXMOX_BRIDGE="${PROXMOX_BRIDGE:-vmbr0}"
 readonly VM_TEMPLATE_ID="${VM_TEMPLATE_ID:-9000}"
+readonly VM_TEMPLATE_FALLBACKS="${VM_TEMPLATE_FALLBACKS:-}"
 readonly VM_OS_TYPE="${VM_OS_TYPE:-ubuntu}"
 
 readonly VM_NAME="${VM_NAME:-}"
 readonly VM_CPU="${VM_CPU:-2}"
 readonly VM_RAM="${VM_RAM:-2048}"
 readonly VM_DISK="${VM_DISK:-20}"
+readonly VM_TYPE="${VM_TYPE:-server}"
+
+# VM_TYPE=desktop: raise defaults and apply GPU/display config
+# Safe: only changes vars still at their default values — user overrides respected.
+if [[ "$VM_TYPE" == "desktop" ]]; then
+    # Raise CPU/RAM/DISK defaults for desktop workload if user didn't override
+    [[ "${VM_CPU}" == "2" ]] && VM_CPU="4"
+    [[ "${VM_RAM}" == "2048" ]] && VM_RAM="8192"
+    [[ "${VM_DISK}" == "20" ]] && VM_DISK="64"
+fi
+
+# ─── ISO Bootstrap Configuration ─────────────────────────────────
+# When no templates exist, the deployment specialist can download cloud
+# images via the Proxmox API (no SSH needed) and create templates via
+# a one-time SSH qm importdisk call. This is the self-healing path.
+readonly ISO_STORAGE="${ISO_STORAGE:-local}"                     # Storage for ISO downloads (must support 'iso' content type)
+readonly TEMPLATE_STORAGE="${TEMPLATE_STORAGE:-local-lvm}"       # Storage for imported VM disk
+readonly TEMPLATE_BASE_ID="${TEMPLATE_BASE_ID:-9005}"            # First VM ID for auto-created templates (9005-9010 range)
+readonly BOOTSTRAP_TEMPLATE="${BOOTSTRAP_TEMPLATE:-false}"       # Set to 'true' to create template from ISO when none exist
+readonly BOOTSTRAP_TIMEOUT="${BOOTSTRAP_TIMEOUT:-900}"           # Max seconds for ISO download (600-900 MB images)
+
+# Known-good cloud image URLs — stable, vendor-published, cloud-init ready
+declare -A KNOWN_CLOUD_IMAGES=(
+    [ubuntu-2404]="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img|ubuntu-24.04-cloudimg-amd64.img|sha256:|~600 MB|Ubuntu 24.04 LTS (Noble Numbat)"
+    [ubuntu-2204]="https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img|ubuntu-22.04-cloudimg-amd64.img|sha256:|~550 MB|Ubuntu 22.04 LTS (Jammy Jellyfish)"
+    [almalinux-9]="https://repo.almalinux.org/almalinux/9/cloud/x86_64/images/AlmaLinux-9-GenericCloud-latest.x86_64.qcow2|alma-9-cloudimg-amd64.qcow2|sha256:|~900 MB|AlmaLinux 9"
+    [debian-12]="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2|debian-12-cloudimg-amd64.qcow2|sha256:|~500 MB|Debian 12 (Bookworm)"
+    [rocky-9]="https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base.latest.x86_64.qcow2|rocky-9-cloudimg-amd64.qcow2|sha256:|~900 MB|Rocky Linux 9"
+)
 
 # Global variables (set by functions)
 ALLOCATED_VM_ID=""
 VM_IP=""
+VM_SSH_KEY=""  # Discovered SSH key path (set by configure_vm)
+SELECTED_TEMPLATE_ID=""     # Set by select_template
+SELECTED_TEMPLATE_OSTYPE="" # Set by select_template
+DISCOVERED_TEMPLATES=()     # Array of "id:name:ostype" — set by discover_templates
+LINUS_WARNINGS=()           # Accumulated non-fatal warning tags (§3.1.6)
+DOWNLOADED_ISO_VOLID=""     # Set by download_cloud_image
+DOWNLOADED_ISO_FILENAME=""  # Set by download_cloud_image
+_CREATED_TEMPLATE_ID=""     # Set by create_template_from_image
+PROXMOX_FREE_RAM_MB=0       # Set by discover_host_capacity
+readonly PROVISION_START_TIME=$(date +%s)  # For LINUS_COST wall time tracking
+
+# ─── Warning Helper ───────────────────────────────────────────────
+# Appends a warning tag to the global accumulator.
+# Usage: _warn_tag "qemu_agent_failed"
+
+_warn_tag() {
+    LINUS_WARNINGS+=("$1")
+}
 
 # Proxmox API helper — wraps curl with token auth
 _pvesh() {
@@ -207,21 +257,87 @@ _pvesh_set() {
     _pvesh put "/nodes/${PROXMOX_NODE}/qemu/${vm_id}/config" --data-raw "$json"
 }
 
-# Set SSH user based on OS type
-case "${VM_OS_TYPE}" in
-    ubuntu)
-        VM_SSH_USER="ubuntu"
-        ;;
-    almalinux)
-        VM_SSH_USER="almalinux"
-        ;;
-    rocky)
-        VM_SSH_USER="rocky"
-        ;;
-    *)
-        VM_SSH_USER="cloud-user"
-        ;;
-esac
+# Set SSH user from the selected template's actual ciuser config (§3.4).
+# Falls back to OS-type-based detection if template config doesn't specify.
+_detected_os="${SELECTED_TEMPLATE_OSTYPE:-${VM_OS_TYPE:-ubuntu}}"
+
+# Read template's existing ciuser — don't guess
+template_ciuser=""
+if [[ -n "${SELECTED_TEMPLATE_ID:-}" ]]; then
+    template_ciuser=$(read_template_config "$SELECTED_TEMPLATE_ID" | jq -r '.data.ciuser // ""' 2>/dev/null) || template_ciuser=""
+fi
+
+if [[ -n "$template_ciuser" && "$template_ciuser" != "null" ]]; then
+    VM_SSH_USER="$template_ciuser"
+    log_info "SSH user from template config: ${VM_SSH_USER} (ciuser)"
+else
+    case "${_detected_os}" in
+        ubuntu|debian)
+            VM_SSH_USER="ubuntu"
+            ;;
+        almalinux)
+            VM_SSH_USER="almalinux"
+            ;;
+        rocky)
+            VM_SSH_USER="rocky"
+            ;;
+        *)
+            VM_SSH_USER="cloud-user"
+            ;;
+    esac
+    log_info "SSH user from OS detection: ${VM_SSH_USER} (detected OS: ${_detected_os})"
+fi
+
+# ─── LLM Eval Helper ─────────────────────────────────────────────
+# Calls llm-eval.py for non-deterministic touch points.
+# Returns decision text; falls back to deterministic silently.
+
+_linus_llm_eval() {
+    local mode="$1"
+    local input_text="$2"
+    local eval_script="${REPO_ROOT:-$SCRIPT_DIR/..}/shared/lib/llm-eval.py"
+    
+    if [[ ! -f "$eval_script" ]]; then
+        eval_script="$SCRIPT_DIR/../lib/llm-eval.py"
+    fi
+    
+    if [[ ! -f "$eval_script" ]]; then
+        return 1  # No evaluator available
+    fi
+    
+    python3 "$eval_script" "$mode" <<< "$input_text" 2>/dev/null || true
+}
+
+# ─── Template Bootstrap Handler ───────────────────────────────────
+# Called when discover_templates() or select_template() fails.
+# If PROXMOX_SSH_PASS is set, auto-bootstraps from ISO.
+# Otherwise, outputs NEEDS_TEMPLATE_BOOTSTRAP for the operating agent.
+# Returns: 0 if bootstrapped successfully, non-zero to abort
+# ───────────────────────────────────────────────────────────────────
+
+_handle_missing_templates() {
+    local os_key="${VM_OS_TYPE:-ubuntu}"
+
+    # Auto-bootstrap path: SSH credentials available + bootstrap requested
+    if [[ "${BOOTSTRAP_TEMPLATE:-false}" == "true" ]] && [[ -n "${PROXMOX_SSH_PASS:-}" ]]; then
+        log_warn "No templates found — attempting auto-bootstrap from cloud image"
+        if bootstrap_template_from_iso "$os_key"; then
+            # Re-run template discovery/selection with fresh data
+            if discover_templates && select_template; then
+                log_success "Template bootstrap successful — proceeding with provisioning"
+                return 0
+            fi
+            log_error "Template created but selection still failed"
+            return 3
+        fi
+        log_error "Template bootstrap failed"
+        return 5
+    fi
+
+    # Agent information path: no SSH credentials — tell the operating agent
+    output_bootstrap_instructions "$os_key"
+    return 9  # Exit code 9 = "needs human intervention (template bootstrap)"
+}
 
 # -----------------------------------------------------------------------------
 # Function: validate_environment
@@ -266,14 +382,15 @@ validate_environment() {
     }
     log_info "Bridge: ${PROXMOX_BRIDGE} OK"
     
-    # Check template exists - we'll verify via API call instead of qm command
-    log_info "Checking template VM..."
-    local template_check
-    template_check=$(_pvesh get /nodes/${PROXMOX_NODE}/qemu/${VM_TEMPLATE_ID}/status/current 2>&1) || {
-        log_error "Template VM ${VM_TEMPLATE_ID} not found"
-        return 3
-    }
-    log_info "Template: VM ${VM_TEMPLATE_ID} OK"
+    # Check templates exist via discovery (single API call, no 404 problem)
+    log_info "Checking templates..."
+    if ! discover_templates; then
+        _handle_missing_templates || return $?
+    fi
+    
+    if ! select_template; then
+        _handle_missing_templates || return $?
+    fi
 
     # Validate OS type
     validate_os "${VM_OS_TYPE}" || return 3
@@ -333,6 +450,44 @@ for iface in data:
 }
 
 # -----------------------------------------------------------------------------
+# Function: discover_host_capacity
+# -----------------------------------------------------------------------------
+# Queries Proxmox node status and storage to determine free resources.
+# Used by multi-VM orchestrators to avoid over-provisioning the host.
+# Sets: PROXMOX_FREE_RAM_MB, PROXMOX_FREE_DISK_GB, PROXMOX_TOTAL_CPUS
+# Returns: 0 on success, 1 on API error (non-fatal — capacity tracking disabled)
+# -----------------------------------------------------------------------------
+
+discover_host_capacity() {
+    log_step "1c" "Discovering host capacity"
+
+    local node_status storage_info
+    
+    node_status=$(_pvesh get /nodes/${PROXMOX_NODE}/status 2>/dev/null) || {
+        log_warn "Could not query node status — capacity tracking disabled"
+        _warn_tag "capacity_discovery_failed"
+        return 1
+    }
+    
+    PROXMOX_FREE_RAM_MB=$(echo "$node_status" | jq -r '.data.memory.free // 0' | awk '{print int($1/1048576)}')
+    PROXMOX_TOTAL_CPUS=$(echo "$node_status" | jq -r '.data.cpuinfo.cpus // 0')
+    
+    storage_info=$(_pvesh get "/nodes/${PROXMOX_NODE}/storage/${PROXMOX_STORAGE}/status" 2>/dev/null) || {
+        log_warn "Could not query storage — disk tracking disabled"
+        PROXMOX_FREE_DISK_GB=0
+        return 1
+    }
+    
+    local total_bytes used_bytes
+    total_bytes=$(echo "$storage_info" | jq -r '.data.total // 0')
+    used_bytes=$(echo "$storage_info" | jq -r '.data.used // 0')
+    PROXMOX_FREE_DISK_GB=$(awk "BEGIN {print int(($total_bytes - $used_bytes) / 1073741824)}")
+    
+    log_info "Host capacity: ${PROXMOX_FREE_RAM_MB}MB RAM free, ${PROXMOX_FREE_DISK_GB}GB disk free, ${PROXMOX_TOTAL_CPUS} CPUs"
+    return 0
+}
+
+# -----------------------------------------------------------------------------
 # Function: allocate_vm_id
 # -----------------------------------------------------------------------------
 # Finds the next available VM ID
@@ -360,6 +515,16 @@ print(' '.join(str(i) for i in ids))
             ALLOCATED_VM_ID="$vm_id"
             # Static IP: {subnet}.{vmid} (no DHCP on most Proxmox bridges)
             ALLOCATED_VM_IP="${SUBNET_PREFIX}.${vm_id}"
+            
+            # Capacity guard: warn/refuse if host is near resource limits
+            if [[ -n "${PROXMOX_FREE_RAM_MB:-}" && $VM_RAM -gt $((PROXMOX_FREE_RAM_MB - 1024)) ]]; then
+                log_warn "Low host RAM: ${PROXMOX_FREE_RAM_MB}MB free, VM needs ${VM_RAM}MB (1GB headroom reserved)"
+            fi
+            if [[ -n "${PROXMOX_FREE_DISK_GB:-}" && ${PROXMOX_FREE_DISK_GB:-0} -gt 0 && $VM_DISK -gt ${PROXMOX_FREE_DISK_GB:-0} ]]; then
+                log_error "Insufficient host disk: ${PROXMOX_FREE_DISK_GB}GB free, VM needs ${VM_DISK}GB"
+                return 7
+            fi
+            
             log_success "Allocated VM ID: $vm_id (IP: $ALLOCATED_VM_IP, subnet: $VM_CIDR)"
             return 0
         fi
@@ -372,6 +537,620 @@ print(' '.join(str(i) for i in ids))
 }
 
 # -----------------------------------------------------------------------------
+# Function: discover_templates
+# -----------------------------------------------------------------------------
+# Discovers all available templates on the node by listing all VMs and filtering
+# for template=1. Single API call — no 404 problem unlike per-template status checks.
+# Sets: DISCOVERED_TEMPLATES (array of "id:name:ostype" strings)
+# Returns: 0 on success, non-zero if no templates found
+# -----------------------------------------------------------------------------
+
+discover_templates() {
+    log_info "Discovering templates on node ${PROXMOX_NODE}..."
+    
+    DISCOVERED_TEMPLATES=()
+    
+    local templates_json
+    templates_json=$(_pvesh get "/nodes/${PROXMOX_NODE}/qemu" 2>/dev/null) || {
+        log_warn "Could not list VMs — template discovery failed"
+        return 1
+    }
+    
+    # Parse: extract vmid, name, and template flag
+    while IFS= read -r line; do
+        DISCOVERED_TEMPLATES+=("$line")
+    done < <(echo "$templates_json" | python3 -c "
+import json, sys
+data = json.load(sys.stdin).get('data', [])
+for vm in data:
+    if vm.get('template') == 1:
+        vmid = vm.get('vmid', '')
+        name = vm.get('name', 'unknown')
+        # Try to detect OS type from name
+        ostype = 'unknown'
+        name_lower = name.lower()
+        if 'ubuntu' in name_lower:
+            ostype = 'ubuntu'
+        elif 'alma' in name_lower:
+            ostype = 'almalinux'
+        elif 'rocky' in name_lower:
+            ostype = 'rocky'
+        elif 'debian' in name_lower:
+            ostype = 'debian'
+        print(f'{vmid}:{name}:{ostype}')
+" 2>/dev/null)
+    
+    if [[ ${#DISCOVERED_TEMPLATES[@]} -eq 0 ]]; then
+        log_error "No templates found on node ${PROXMOX_NODE}"
+        return 1
+    fi
+    
+    log_success "Discovered ${#DISCOVERED_TEMPLATES[@]} template(s)"
+    for t in "${DISCOVERED_TEMPLATES[@]}"; do
+        log_info "  Template: $t"
+    done
+    return 0
+}
+
+# -----------------------------------------------------------------------------
+# Function: select_template
+# -----------------------------------------------------------------------------
+# Selects the best template from discovered templates or fallback list.
+# Priority: exact VM_TEMPLATE_ID match → VM_TEMPLATE_FALLBACKS → any template
+# matching VM_OS_TYPE → any template
+# Sets: SELECTED_TEMPLATE_ID, SELECTED_TEMPLATE_OSTYPE
+# Returns: 0 on success, 3 if no template found
+# -----------------------------------------------------------------------------
+
+select_template() {
+    log_step "2b" "Selecting template"
+    
+    # Normalize OS type for matching
+    local os_filter="${VM_OS_TYPE:-ubuntu}"
+    
+    # First: try the explicitly requested template ID
+    if [[ -n "${VM_TEMPLATE_ID:-}" ]]; then
+        for t in "${DISCOVERED_TEMPLATES[@]}"; do
+            local t_id="${t%%:*}"
+            if [[ "$t_id" == "$VM_TEMPLATE_ID" ]]; then
+                SELECTED_TEMPLATE_ID="$t_id"
+                SELECTED_TEMPLATE_OSTYPE=$(echo "$t" | cut -d: -f3)
+                log_success "Selected requested template: VM ${t_id} (${SELECTED_TEMPLATE_OSTYPE})"
+                return 0
+            fi
+        done
+        log_warn "Requested template VM ${VM_TEMPLATE_ID} not found — trying fallbacks"
+    fi
+    
+    # Second: try fallback chain
+    local fallbacks="${VM_TEMPLATE_FALLBACKS:-}"
+    if [[ -n "$fallbacks" ]]; then
+        IFS=',' read -ra fb_arr <<< "$fallbacks"
+        for fb_id in "${fb_arr[@]}"; do
+            fb_id="${fb_id## }"; fb_id="${fb_id%% }"  # trim whitespace
+            for t in "${DISCOVERED_TEMPLATES[@]}"; do
+                local t_id="${t%%:*}"
+                if [[ "$t_id" == "$fb_id" ]]; then
+                    SELECTED_TEMPLATE_ID="$t_id"
+                    SELECTED_TEMPLATE_OSTYPE=$(echo "$t" | cut -d: -f3)
+                    log_success "Selected fallback template: VM ${t_id} (${SELECTED_TEMPLATE_OSTYPE})"
+                    return 0
+                fi
+            done
+        done
+        log_warn "No fallback templates found — trying OS-type match"
+    fi
+    
+    # Third: match by OS type
+    # If multiple matches, use LLM touch point (PP-TP1) to pick the best
+    local matching_templates=()
+    for t in "${DISCOVERED_TEMPLATES[@]}"; do
+        local t_os=$(echo "$t" | cut -d: -f3)
+        if [[ "$t_os" == "$os_filter" ]]; then
+            matching_templates+=("$t")
+        fi
+    done
+    
+    if [[ ${#matching_templates[@]} -eq 1 ]]; then
+        SELECTED_TEMPLATE_ID="${matching_templates[0]%%:*}"
+        SELECTED_TEMPLATE_OSTYPE=$(echo "${matching_templates[0]}" | cut -d: -f3)
+        log_success "Selected OS-matched template: VM ${SELECTED_TEMPLATE_ID} (${SELECTED_TEMPLATE_OSTYPE})"
+        return 0
+    elif [[ ${#matching_templates[@]} -gt 1 ]]; then
+        # PP-TP1: Multiple matching templates — use LLM to pick best
+        local template_list
+        template_list=$(printf '%s\n' "${matching_templates[@]}")
+        local llm_choice
+        llm_choice=$(_linus_llm_eval "proxmox-template-select" "Requested OS: ${os_filter}
+Available templates:
+${template_list}
+Select the best template VM ID." 2>/dev/null) || llm_choice=""
+        
+        if [[ -n "$llm_choice" ]]; then
+            # Verify the LLM picked a valid template ID
+            for t in "${matching_templates[@]}"; do
+                if [[ "${t%%:*}" == "$llm_choice" ]]; then
+                    SELECTED_TEMPLATE_ID="$llm_choice"
+                    SELECTED_TEMPLATE_OSTYPE=$(echo "$t" | cut -d: -f3)
+                    log_success "LLM selected template: VM ${SELECTED_TEMPLATE_ID} (${SELECTED_TEMPLATE_OSTYPE})"
+                    return 0
+                fi
+            done
+        fi
+        # LLM failed or returned invalid — fall through to first match
+        log_info "LLM template selection unavailable — using first match"
+        SELECTED_TEMPLATE_ID="${matching_templates[0]%%:*}"
+        SELECTED_TEMPLATE_OSTYPE=$(echo "${matching_templates[0]}" | cut -d: -f3)
+        log_success "Selected OS-matched template: VM ${SELECTED_TEMPLATE_ID} (${SELECTED_TEMPLATE_OSTYPE})"
+        return 0
+    fi
+    
+    # Last resort: any template
+    if [[ ${#DISCOVERED_TEMPLATES[@]} -gt 0 ]]; then
+        local t="${DISCOVERED_TEMPLATES[0]}"
+        SELECTED_TEMPLATE_ID="${t%%:*}"
+        SELECTED_TEMPLATE_OSTYPE=$(echo "$t" | cut -d: -f3)
+        log_warn "No OS match — using first available template: VM ${SELECTED_TEMPLATE_ID} (${SELECTED_TEMPLATE_OSTYPE})"
+        return 0
+    fi
+    
+    log_error "No templates available on node ${PROXMOX_NODE}"
+    return 3
+}
+
+# -----------------------------------------------------------------------------
+# Function: read_template_config
+# -----------------------------------------------------------------------------
+# Reads the existing configuration of a template VM before modifying it.
+# Returns config as JSON. Used to preserve existing ciuser, ostype, cpu settings
+# rather than guessing OS defaults (§3.4).
+#
+# Args: template_id
+# Returns: JSON config on stdout, empty on error
+# -----------------------------------------------------------------------------
+
+read_template_config() {
+    local template_id="$1"
+    _pvesh get "/nodes/${PROXMOX_NODE}/qemu/${template_id}/config" 2>/dev/null || echo "{}"
+}
+
+# =============================================================================
+# Template Bootstrap Functions (ISO download + template creation)
+# =============================================================================
+# These functions implement the self-healing path when no VM templates exist:
+#   1. Download cloud image via Proxmox API (no SSH)
+#   2. Import disk + create template via SSH (one-time qm importdisk)
+#   3. Re-discover templates (the new one now exists)
+#
+# When PROXMOX_SSH_PASS is NOT set, output NEEDS_TEMPLATE_BOOTSTRAP instead of
+# failing — the operating agent informs the user and collects SSH credentials.
+# =============================================================================
+
+# ─── get_known_iso_info ────────────────────────────────────────────
+# Returns the known cloud image info for an OS type.
+# Output format: url|filename|checksum_type:checksum|size|description
+# Args: os_key (e.g., "ubuntu-2404", "almalinux-9")
+# Returns: pipe-delimited info on stdout, empty on unknown OS
+# ───────────────────────────────────────────────────────────────────
+
+get_known_iso_info() {
+    local os_key="$1"
+    # Map VM_OS_TYPE values to our known image keys
+    case "${os_key}" in
+        ubuntu|ubuntu2404) os_key="ubuntu-2404" ;;
+        ubuntu2204|jammy)  os_key="ubuntu-2204" ;;
+        almalinux|alma9)   os_key="almalinux-9" ;;
+        debian|debian12)   os_key="debian-12" ;;
+        rocky|rocky9)      os_key="rocky-9" ;;
+    esac
+    echo "${KNOWN_CLOUD_IMAGES[$os_key]:-}"
+}
+
+# ─── find_iso_in_storage ───────────────────────────────────────────
+# Checks whether a cloud image ISO already exists in Proxmox storage.
+# Args: filename (e.g. "ubuntu-24.04-cloudimg-amd64.img")
+# Returns: 0 and prints volid on stdout if found, 1 if not found
+# ───────────────────────────────────────────────────────────────────
+
+find_iso_in_storage() {
+    local target_filename="$1"
+    local storage="${2:-${ISO_STORAGE}}"
+
+    log_info "Checking for existing ISO in storage ${storage}..."
+
+    local content_json
+    content_json=$(_pvesh get "/nodes/${PROXMOX_NODE}/storage/${storage}/content" 2>/dev/null) || {
+        log_warn "Could not query storage content"
+        return 1
+    }
+
+    # Search for matching filename
+    local found
+    found=$(echo "$content_json" | python3 -c "
+import json, sys
+data = json.load(sys.stdin).get('data', [])
+for item in data:
+    volid = item.get('volid', '')
+    if '${target_filename}' in volid:
+        print(volid)
+        break
+" 2>/dev/null)
+
+    if [[ -n "$found" ]]; then
+        log_success "ISO already exists: ${found}"
+        echo "$found"
+        return 0
+    fi
+
+    log_info "ISO '${target_filename}' not found in storage"
+    return 1
+}
+
+# ─── download_cloud_image ──────────────────────────────────────────
+# Downloads a cloud image ISO via the Proxmox download-url API.
+# Args: os_key, [filename], [checksum]
+# Returns: 0 on success (sets DOWNLOADED_ISO_VOLID), non-zero on failure
+# ───────────────────────────────────────────────────────────────────
+
+download_cloud_image() {
+    local os_key="$1"
+    local custom_filename="${2:-}"
+    local checksum="${3:-}"
+
+    local iso_info
+    iso_info=$(get_known_iso_info "$os_key")
+    if [[ -z "$iso_info" ]]; then
+        log_error "No known cloud image URL for OS: ${os_key}"
+        return 9
+    fi
+
+    local iso_url filename iso_size description
+    IFS='|' read -r iso_url filename _checksum_info iso_size description <<< "$iso_info"
+    filename="${custom_filename:-$filename}"
+
+    log_step "B1" "Downloading ${description} cloud image"
+    log_info "  URL: ${iso_url}"
+    log_info "  Filename: ${filename}"
+    log_info "  Size: ${iso_size}"
+    log_info "  Storage: ${ISO_STORAGE}"
+
+    # First check if already downloaded
+    local existing
+    if existing=$(find_iso_in_storage "$filename" 2>/dev/null) && [[ -n "$existing" ]]; then
+        DOWNLOADED_ISO_VOLID="$existing"
+        DOWNLOADED_ISO_FILENAME="$filename"
+        log_success "Using existing ISO: ${existing}"
+        return 0
+    fi
+
+    # Build the download request payload
+    local payload
+    payload=$(python3 -c "
+import json
+payload = {
+    'content': 'iso',
+    'filename': '${filename}',
+    'url': '${iso_url}',
+    'node': '${PROXMOX_NODE}',
+    'storage': '${ISO_STORAGE}'
+}
+if '${checksum}': payload['checksum'] = '${checksum}'
+if '${checksum}' and 'sha256' in '${checksum}': payload['checksum-algorithm'] = 'sha256'
+json.dump(payload, open('/tmp/linus-iso-payload.json', 'w'))
+")
+
+    # Fire the download — this is async (returns UPID like clone)
+    local response upid
+    response=$(curl -sk --fail -X POST \
+        -H "Authorization: PVEAPIToken=${PROXMOX_USER}!${PROXMOX_TOKEN_ID}=${PROXMOX_TOKEN_SECRET}" \
+        -H "Content-Type: application/json" \
+        --data-binary @/tmp/linus-iso-payload.json \
+        "https://${PROXMOX_HOST}:8006/api2/json/nodes/${PROXMOX_NODE}/storage/${ISO_STORAGE}/download-url" 2>&1) || {
+        local exit_code=$?
+        log_error "ISO download request failed (curl exit ${exit_code}): ${response}"
+        rm -f /tmp/linus-iso-payload.json
+        return 5
+    }
+    rm -f /tmp/linus-iso-payload.json
+
+    upid=$(echo "$response" | python3 -c "import json,sys; print(json.load(sys.stdin).get('data',''))" 2>/dev/null)
+    if [[ -z "$upid" ]]; then
+        log_error "No task UPID in download response: ${response}"
+        return 5
+    fi
+
+    log_info "Download started — task: ${upid}"
+
+    # Poll until download completes
+    if ! poll_download_task "$upid" "$BOOTSTRAP_TIMEOUT"; then
+        log_error "ISO download failed or timed out"
+        return 5
+    fi
+
+    # Verify the ISO appears in storage
+    local verify_volid
+    verify_volid=$(find_iso_in_storage "$filename" 2>/dev/null) || true
+    if [[ -z "$verify_volid" ]]; then
+        log_error "ISO download task completed but file not found in storage"
+        return 5
+    fi
+
+    DOWNLOADED_ISO_VOLID="$verify_volid"
+    DOWNLOADED_ISO_FILENAME="$filename"
+    log_success "Cloud image downloaded: ${verify_volid}"
+    return 0
+}
+
+# ─── poll_download_task ────────────────────────────────────────────
+# Polls an async Proxmox task (from download-url) until completion.
+# Args: upid, [timeout_seconds=900]
+# Returns: 0 on success, 1 on timeout, 2 on task failure
+# ───────────────────────────────────────────────────────────────────
+
+poll_download_task() {
+    local upid="$1"
+    local timeout="${2:-900}"
+    local elapsed=0
+    local interval=10
+
+    log_info "Waiting for download to complete (timeout: ${timeout}s)..."
+
+    while [[ $elapsed -lt $timeout ]]; do
+        local status_json
+        status_json=$(_pvesh get "/nodes/${PROXMOX_NODE}/tasks/${upid}/status" 2>/dev/null) || {
+            sleep $interval
+            elapsed=$((elapsed + interval))
+            continue
+        }
+
+        local task_status exitstatus
+        task_status=$(echo "$status_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('data',{}).get('status',''))" 2>/dev/null)
+        exitstatus=$(echo "$status_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('data',{}).get('exitstatus',''))" 2>/dev/null)
+
+        case "$task_status" in
+            stopped)
+                if [[ "$exitstatus" == "OK" ]]; then
+                    log_success "Download completed (${elapsed}s)"
+                    return 0
+                else
+                    log_error "Download task failed: ${exitstatus}"
+                    return 2
+                fi
+                ;;
+            "")
+                # Task not yet available — keep polling
+                ;;
+        esac
+
+        # Progress indicator every 30 seconds
+        if [[ $((elapsed % 30)) -eq 0 && $elapsed -gt 0 ]]; then
+            log_info "  Download in progress... (${elapsed}s elapsed)"
+        fi
+
+        sleep $interval
+        elapsed=$((elapsed + interval))
+    done
+
+    log_error "Download timed out after ${timeout}s"
+    return 1
+}
+
+# ─── create_template_from_image ────────────────────────────────────
+# Converts a downloaded cloud image into a Proxmox VM template.
+# THIS IS THE ONLY FUNCTION THAT REQUIRES SSH TO THE PROXMOX HOST.
+# Uses qm importdisk + qm template — no REST API equivalent exists.
+#
+# Args: template_vmid, os_type (e.g. "ubuntu"), cpu_cores, ram_mb, disk_gb
+# Requires: PROXMOX_SSH_PASS (temporary, not stored), DOWNLOADED_ISO_FILENAME
+# Returns: 0 on success, non-zero on failure
+# ───────────────────────────────────────────────────────────────────
+
+create_template_from_image() {
+    local template_vmid="$1"
+    local os_type="${2:-ubuntu}"
+    local cpu="${3:-2}"
+    local ram="${4:-2048}"
+    local disk="${5:-20}"
+
+    if [[ -z "${PROXMOX_SSH_PASS:-}" ]]; then
+        log_error "PROXMOX_SSH_PASS is required for template creation (qm importdisk needs SSH)"
+        log_error "This is a one-time operation per OS image. Set PROXMOX_SSH_PASS and re-run."
+        return 7
+    fi
+
+    if [[ -z "${DOWNLOADED_ISO_FILENAME:-}" ]]; then
+        log_error "No ISO filename — run download_cloud_image first"
+        return 3
+    fi
+
+    local iso_path="/var/lib/vz/template/iso/${DOWNLOADED_ISO_FILENAME}"
+    local ostype_flag
+
+    # Map OS type to Proxmox ostype flag
+    case "$os_type" in
+        ubuntu|debian) ostype_flag="l26" ;;   # Linux 2.6+ kernel
+        almalinux|rocky) ostype_flag="l26" ;;
+        *) ostype_flag="l26" ;;
+    esac
+
+    log_step "B2" "Creating VM template from cloud image"
+    log_info "  VM ID: ${template_vmid}"
+    log_info "  OS type: ${os_type} (ostype=${ostype_flag})"
+    log_info "  CPU: ${cpu} cores, RAM: ${ram} MB, Disk: ${disk} GB"
+    log_info "  ISO path: ${iso_path}"
+    log_info "  Storage: ${TEMPLATE_STORAGE}"
+    log_info "  THIS REQUIRES TEMPORARY SSH ACCESS TO PROXMOX HOST (one-time)"
+
+    # Write a local script that will be scp'd to Proxmox host and executed.
+    # This avoids the escaping nightmare of inline SSH commands.
+    local script_path="/tmp/linus-create-template-${template_vmid}.sh"
+    python3 -c "
+script = '''#!/bin/bash
+set -euo pipefail
+echo \"[qm] Creating VM ${template_vmid}...\"
+qm create ${template_vmid} \\
+    --name '${os_type}-cloud-template' \\
+    --memory ${ram} \\
+    --cores ${cpu} \\
+    --net0 virtio,bridge=vmbr0 \\
+    --ostype ${ostype_flag} \\
+    --scsihw virtio-scsi-pci
+
+echo \"[qm] Importing disk from ${iso_path}...\"
+qm importdisk ${template_vmid} '${iso_path}' ${TEMPLATE_STORAGE}
+
+echo \"[qm] Attaching disk...\"
+UNUSED=\$(qm config ${template_vmid} | grep -E '^unused0:' | cut -d' ' -f2)
+qm set ${template_vmid} --scsi0 \"\${UNUSED}\"
+
+echo \"[qm] Configuring cloud-init...\"
+qm set ${template_vmid} --ide2 ${TEMPLATE_STORAGE}:cloudinit
+qm set ${template_vmid} --boot c --bootdisk scsi0
+qm set ${template_vmid} --serial0 socket --vga serial0
+qm set ${template_vmid} --agent enabled=1
+qm set ${template_vmid} --cpu host
+
+echo \"[qm] Converting to template...\"
+qm template ${template_vmid}
+
+echo \"TEMPLATE_OK:${template_vmid}\"
+'''
+with open('${script_path}', 'w') as f:
+    f.write(script)
+"
+
+    # Copy script to Proxmox host
+    local scp_result
+    scp_result=$(sshpass -p "${PROXMOX_SSH_PASS}" scp \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=10 \
+        "${script_path}" "root@${PROXMOX_HOST}:/tmp/linus-create-template.sh" 2>&1) || {
+        log_error "Failed to copy template creation script to Proxmox host:"
+        log_error "${scp_result}"
+        rm -f "${script_path}"
+        return 5
+    }
+    rm -f "${script_path}"
+
+    # Execute the script on Proxmox host
+    local ssh_result
+    ssh_result=$(sshpass -p "${PROXMOX_SSH_PASS}" ssh \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=10 \
+        -o ServerAliveInterval=30 \
+        "root@${PROXMOX_HOST}" \
+        "bash /tmp/linus-create-template.sh && rm -f /tmp/linus-create-template.sh" 2>&1) || {
+        log_error "Template creation via SSH failed:"
+        log_error "${ssh_result}"
+        return 5
+    }
+
+    log_info "qm output: ${ssh_result}"
+
+    if echo "$ssh_result" | grep -q "TEMPLATE_OK:${template_vmid}"; then
+        log_success "Template ${template_vmid} created from cloud image"
+        _CREATED_TEMPLATE_ID="${template_vmid}"
+        return 0
+    fi
+
+    log_error "Template creation output did not confirm success"
+    return 5
+}
+
+# ─── bootstrap_template_from_iso ───────────────────────────────────
+# Full bootstrap flow: download ISO → create template → re-discover.
+# This is the single entry point for the self-healing path.
+#
+# Args: os_key (e.g., "ubuntu-2404")
+# Requires: PROXMOX_SSH_PASS (temporary, for qm importdisk only)
+# Returns: 0 on success (template created + discoverable), non-zero on failure
+# ───────────────────────────────────────────────────────────────────
+
+bootstrap_template_from_iso() {
+    local os_key="$1"
+    local template_vmid="${TEMPLATE_BASE_ID}"
+
+    log_header "Template Bootstrap — Creating template from cloud image"
+    log_info "No templates found. Bootstrapping ${os_key} template from ISO."
+    log_info "This downloads ~600-900 MB via Proxmox API (no SSH) + one SSH command."
+
+    # Step 1: Download cloud image via API
+    if ! download_cloud_image "$os_key"; then
+        log_error "Failed to download cloud image for ${os_key}"
+        return 5
+    fi
+
+    # Step 2: Create template from downloaded image (SSH required here)
+    if ! create_template_from_image "$template_vmid" "${VM_OS_TYPE}" "$VM_CPU" "$VM_RAM" "$VM_DISK"; then
+        log_error "Failed to create template from cloud image"
+        return 5
+    fi
+
+    # Step 3: Re-discover templates (the new one should appear)
+    log_info "Re-discovering templates after bootstrap..."
+    if ! discover_templates; then
+        log_error "Template ${template_vmid} created but not discoverable — check storage"
+        return 5
+    fi
+
+    # Step 4: Verify the new template is in the list
+    local found_new=false
+    for t in "${DISCOVERED_TEMPLATES[@]}"; do
+        if [[ "${t%%:*}" == "${template_vmid}" ]]; then
+            found_new=true
+            break
+        fi
+    done
+
+    if [[ "$found_new" != "true" ]]; then
+        log_error "Template ${template_vmid} created but not found in discovery"
+        return 5
+    fi
+
+    log_success "Template bootstrap complete — VM ${template_vmid} ready for cloning"
+    return 0
+}
+
+# ─── output_bootstrap_instructions ─────────────────────────────────
+# Outputs structured NEEDS_TEMPLATE_BOOTSTRAP result for the operating agent.
+# The agent reads this and prompts the user for temporary SSH credentials.
+# ───────────────────────────────────────────────────────────────────
+
+output_bootstrap_instructions() {
+    local os_key="$1"
+    local iso_info
+    iso_info=$(get_known_iso_info "$os_key")
+
+    if [[ -z "$iso_info" ]]; then
+        linus_failure "No known cloud image for OS: ${os_key}" \
+            "BOOTSTRAP_AVAILABLE_OS:ubuntu-2404 ubuntu-2204 almalinux-9 debian-12 rocky-9"
+        return 9
+    fi
+
+    local iso_url filename iso_size description
+    IFS='|' read -r iso_url filename _checksum iso_size description <<< "$iso_info"
+
+    log_info "No templates found on node ${PROXMOX_NODE}"
+    log_info "Template bootstrap required — operating agent will request SSH credentials"
+
+    linus_result "NEEDS_TEMPLATE_BOOTSTRAP" \
+        "BOOTSTRAP_NODE:${PROXMOX_NODE}" \
+        "BOOTSTRAP_OS_KEY:${os_key}" \
+        "BOOTSTRAP_OS_TYPE:${VM_OS_TYPE}" \
+        "BOOTSTRAP_OS_DESCRIPTION:${description}" \
+        "BOOTSTRAP_ISO_URL:${iso_url}" \
+        "BOOTSTRAP_ISO_FILENAME:${filename}" \
+        "BOOTSTRAP_ISO_SIZE:${iso_size}" \
+        "BOOTSTRAP_STORAGE:${ISO_STORAGE}" \
+        "BOOTSTRAP_TEMPLATE_STORAGE:${TEMPLATE_STORAGE}" \
+        "BOOTSTRAP_TEMPLATE_ID:${TEMPLATE_BASE_ID}" \
+        "BOOTSTRAP_STEPS:1) Download ISO via Proxmox API (no SSH, ~${iso_size}) → 2) Import disk + create template via SSH (one-time, needs PROXMOX_SSH_PASS) → 3) Clone template + provision as normal" \
+        "BOOTSTRAP_INSTRUCTIONS:Set PROXMOX_SSH_PASS (temporary, not stored) and re-run with BOOTSTRAP_TEMPLATE=true to auto-create the template. Or provide SSH credentials to the operating agent."
+}
+
+# -----------------------------------------------------------------------------
 # Function: clone_template
 # -----------------------------------------------------------------------------
 # Clones the template VM to create new VM
@@ -380,16 +1159,17 @@ print(' '.join(str(i) for i in ids))
 # -----------------------------------------------------------------------------
 
 clone_template() {
-    log_step "3" "Cloning template VM ${VM_TEMPLATE_ID}"
+    log_step "3" "Cloning template VM ${SELECTED_TEMPLATE_ID}"
 
     local vm_id="$ALLOCATED_VM_ID"
     local vm_name="${VM_NAME:-linus-vm-${vm_id}}"
+    local template_id="${SELECTED_TEMPLATE_ID}"
 
-    log_info "Creating VM ${vm_id} from template ${VM_TEMPLATE_ID}..."
+    log_info "Creating VM ${vm_id} from template ${template_id}..."
 
     # Clone the template using API call
     local clone_result
-    clone_result=$(_pvesh post /nodes/${PROXMOX_NODE}/qemu/${VM_TEMPLATE_ID}/clone \
+    clone_result=$(_pvesh post /nodes/${PROXMOX_NODE}/qemu/${template_id}/clone \
         --data-raw "{\"newid\":${vm_id},\"name\":\"${vm_name}\",\"full\":1,\"storage\":\"${PROXMOX_STORAGE}\"}" 2>/dev/null)
     
     if [[ -z "$clone_result" ]]; then
@@ -474,18 +1254,22 @@ configure_network_for_os_type() {
             if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
                 --data-raw "{\"agent\":1,\"agent-xpra\":0}" >/dev/null 2>&1; then
                 log_warn "Failed to configure QEMU agent (non-fatal)"
+                _warn_tag "qemu_agent_failed"
             fi
             
             # Configure network0 with explicit bridge settings
             if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
                 --data-raw "{\"net0\":\"model=virtio,bridge=${PROXMOX_BRIDGE},connect=on,network=default\"}" >/dev/null 2>&1; then
                 log_warn "Failed to configure net0 bridge (using default: ${PROXMOX_BRIDGE})"
+                _warn_tag "net0_bridge_failed"
             fi
             
             # For RHEL-based distros, add cloud-init specific settings
-            # This helps with dhcp and network configuration timing
+            # Use the detected SSH user (almalinux/rocky), NOT root — the template
+            # already has ciuser set correctly and SSH key goes to that user's home
+            local _rhel_ssh_user="${VM_SSH_USER:-almalinux}"
             if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
-                --data-raw "{\"ciuser\":\"root\"}" >/dev/null 2>&1; then
+                --data-raw "{\"ciuser\":\"${_rhel_ssh_user}\"}" >/dev/null 2>&1; then
                 log_warn "CIUser not explicitly set (non-fatal)"
             fi
             
@@ -494,6 +1278,7 @@ configure_network_for_os_type() {
             if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
                 --data-raw "{\"net0\":\"ipv4=dhcp\"}" >/dev/null 2>&1; then
                 log_warn "Failed to enable DHCP on net0 (non-fatal)"
+                _warn_tag "dhcp_config_failed"
             fi
             
             log_success "Network configuration applied for AlmaLinux/Rocky"
@@ -524,6 +1309,86 @@ configure_network_for_os_type() {
 }
 
 # -----------------------------------------------------------------------------
+# Function: inject_desktop_cloudinit
+# -----------------------------------------------------------------------------
+# Generates a #cloud-config YAML snippet with the desktop package list
+# (ubuntu-desktop, xdotool, etc.) and uploads it to Proxmox's snippets
+# storage via the API. Sets cicustom so cloud-init installs everything
+# during first boot — SSH comes up with the desktop already ready.
+#
+# Non-fatal: warns on failure but doesn't abort provisioning.
+# Falls back to bootstrap-time install if upload fails.
+# -----------------------------------------------------------------------------
+
+inject_desktop_cloudinit() {
+    local vm_id="$1"
+    local snippet_name="cloud-config-desktop-${vm_id}.yaml"
+    local tmp_yaml
+    tmp_yaml=$(mktemp) || { log_warn "Cannot create temp file for cloud-config"; return 1; }
+    
+    # Generate cloud-config YAML
+    cat > "$tmp_yaml" << 'CLOUDCONFIG_EOF'
+#cloud-config
+package_update: true
+package_upgrade: true
+packages:
+  - ubuntu-desktop
+  - xdotool
+  - x11-utils
+  - net-tools
+  - curl
+  - git
+  - build-essential
+  - python3-pip
+  - openjdk-17-jre-headless
+  - at-spi2-core
+  - accerciser
+  - qemu-guest-agent
+write_files:
+  - path: /etc/gdm3/custom.conf
+    content: |
+      [daemon]
+      WaylandEnable=false
+    owner: root:root
+    permissions: '0644'
+runcmd:
+  - systemctl set-default graphical.target
+CLOUDCONFIG_EOF
+
+    log_info "Uploading cloud-config snippet to Proxmox storage..."
+    
+    # Upload to Proxmox snippets storage via multipart form upload
+    local upload_code
+    upload_code=$(curl -sk --fail -X POST \
+        -H "Authorization: PVEAPIToken=${PROXMOX_USER}!${PROXMOX_TOKEN_ID}=${PROXMOX_TOKEN_SECRET}" \
+        -F "content=snippets" \
+        -F "filename=${snippet_name}" \
+        -F "file=@${tmp_yaml}" \
+        -w "%{http_code}" \
+        -o /dev/null \
+        "https://${PROXMOX_HOST}:8006/api2/json/nodes/${PROXMOX_NODE}/storage/local/upload" 2>/dev/null) || upload_code=0
+    
+    rm -f "$tmp_yaml"
+    
+    if [[ "$upload_code" != "200" ]]; then
+        log_warn "Failed to upload cloud-config snippet (HTTP ${upload_code}) — will install desktop via bootstrap instead"
+        _warn_tag "cloudinit_upload_failed"
+        return 1
+    fi
+    
+    # Set cicustom to reference the uploaded snippet
+    if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
+        --data-raw "{\"cicustom\":\"user=local:snippets/${snippet_name}\"}" >/dev/null 2>&1; then
+        log_warn "Failed to set cicustom (non-fatal) — will install desktop via bootstrap instead"
+        _warn_tag "cicustom_failed"
+        return 1
+    fi
+    
+    log_success "Cloud-init user-data injected — desktop will install during first boot"
+    return 0
+}
+
+# -----------------------------------------------------------------------------
 # Function: configure_vm
 # -----------------------------------------------------------------------------
 # Configures VM resources (CPU, RAM, disk)
@@ -536,12 +1401,38 @@ configure_vm() {
 
     local vm_id="$ALLOCATED_VM_ID"
 
+    # PITFALL 25: Default kvm64 CPU lacks AVX2/SSE4.2 — breaks numpy/pytorch.
+    # Set cpu=host so the VM exposes the full host CPU feature set (AVX2, SSE4.2).
+    # Does NOT pin VM to current physical host — migration between compatible CPUs still works.
+    log_info "Setting CPU type: host (AVX2/SSE4.2 enabled)..."
+    if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
+        --data-raw '{"cpu":"host"}' >/dev/null 2>&1; then
+        log_warn "Failed to set cpu=host (non-fatal — VM will use kvm64 default)"
+        _warn_tag "cpu_host_failed"
+    fi
+
     # Set CPU and RAM
     log_info "Setting CPU: ${VM_CPU} cores, RAM: ${VM_RAM} MB..."
     if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
         --data-raw "{\"cores\":${VM_CPU},\"memory\":${VM_RAM}}" >/dev/null 2>&1; then
         log_error "Failed to set CPU/RAM"
         return 5
+    fi
+
+    # VM_TYPE=desktop: apply VirtIO-GPU, disable ballooning, set ostype
+    if [[ "$VM_TYPE" == "desktop" ]]; then
+        log_info "Desktop VM — applying VirtIO-GPU (128MB VRAM), ostype=l26, balloon=0..."
+        if ! _pvesh put /nodes/${PROXMOX_NODE}/qemu/${vm_id}/config \
+            --data-raw '{"vga":"virtio,memory=128","ostype":"l26","balloon":0}' >/dev/null 2>&1; then
+            log_warn "Failed to set desktop GPU/display config (non-fatal)"
+            _warn_tag "desktop_vga_failed"
+        fi
+
+        # Inject cloud-init user-data to pre-install desktop during first boot.
+        # This uploads a #cloud-config snippet with packages: [ubuntu-desktop, ...]
+        # so the heavy install (~1200 pkgs, ~7 GB) happens during cloud-init,
+        # before SSH comes up. Bootstrap only needs to verify.
+        inject_desktop_cloudinit "$vm_id"
     fi
 
     # PITFALL 8: Disk resize uses /resize, not /config
@@ -568,6 +1459,7 @@ configure_vm() {
     done
     
     if [[ -n "$ssh_key_file" ]]; then
+        VM_SSH_KEY="$ssh_key_file"  # Save for output_result
         local ssh_key_content encoded_key
         ssh_key_content=$(cat "$ssh_key_file" | tr -d '\n')
         # URL-encode the key: spaces→%20, +→%2B, /→%2F
@@ -585,6 +1477,7 @@ configure_vm() {
             else
                 log_warn "SSH key injection failed (both API and sshpass)"
                 log_warn "VM will be reachable by ping but not SSH"
+                _warn_tag "ssh_key_injection_failed"
             fi
         else
             log_warn "API key injection failed and PROXMOX_SSH_PASS not set"
@@ -626,6 +1519,7 @@ regenerate_cloudinit() {
     response=$(curl -sk --fail -X PUT -H "$auth_header" -w "\n%{http_code}" "$url" 2>&1) || {
         http_code="${response##*$'\n'}"
         log_warn "Cloud-init regeneration failed (HTTP ${http_code})"
+        _warn_tag "cloudinit_regen_failed"
         return 1
     }
     
@@ -633,6 +1527,7 @@ regenerate_cloudinit() {
     local final_http_code="${response##*$'\n'}"
     if [[ "$final_http_code" != "200" ]]; then
         log_warn "Cloud-init regeneration returned HTTP ${final_http_code} (expected 200)"
+        _warn_tag "cloudinit_http_${final_http_code}"
         return 1
     fi
     
@@ -772,7 +1667,117 @@ verify_ssh_ready() {
         "exit 0" 2>&1 | grep -iE 'debug1.*(Offering|Authenticat|Trying|identity|auth|Accepted|denied|closed|Permission|key type)' | tail -5 || true
 
     log_error "SSH not accessible after ${max_wait}s"
+    _warn_tag "ssh_timeout"
     return 6
+}
+
+# -----------------------------------------------------------------------------
+# Function: verify_vm_capability
+# -----------------------------------------------------------------------------
+# Verifies the VM is capable of running workloads — not just that SSH works.
+# Checks: CPU supports AVX2/SSE4.2 (ML workloads), >2GB free disk, DNS works,
+#         Python is installed.
+# Requires: VM_IP
+# Returns: 0 on success, 8 on capability failure (quality gate)
+# -----------------------------------------------------------------------------
+
+verify_vm_capability() {
+    log_step "7b" "Verifying VM capability"
+
+    local vm_ip="$VM_IP"
+    local ssh_user="${VM_SSH_USER:-ubuntu}"
+    
+    # Build SSH args (same as verify_ssh_ready)
+    local ssh_key=""
+    for candidate in ~/.ssh/id_ed25519_qemu_test ~/.ssh/id_ed25519 ~/.ssh/id_rsa; do
+        if [[ -f "$candidate" ]]; then
+            ssh_key="$candidate"
+            break
+        fi
+    done
+    
+    local ssh_args=(-o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+    [[ -n "$ssh_key" ]] && ssh_args+=(-i "$ssh_key")
+
+    local all_passed=true
+    
+    # Check 1: CPU supports AVX2/SSE4.2 (pitfall #25 — kvm64 CPU breaks numpy)
+    log_info "Checking CPU features..."
+    if ssh "${ssh_args[@]}" "${ssh_user}@${vm_ip}" \
+        "grep -q -E 'avx2|sse4_2' /proc/cpuinfo" 2>/dev/null; then
+        log_info "  CPU supports AVX2/SSE4.2 ✅"
+    else
+        log_warn "  CPU MISSING AVX2/SSE4.2 — ML workloads may crash (kvm64 CPU type)"
+        log_warn "  Fix: set cpu=host in VM config before start"
+        all_passed=false
+    fi
+    
+    # Check 2: >2 GB free disk space
+    log_info "Checking disk space..."
+    local disk_free
+    disk_free=$(ssh "${ssh_args[@]}" "${ssh_user}@${vm_ip}" \
+        "df -BG / | awk 'NR==2 {print \$4}' | sed 's/G//'" 2>/dev/null) || disk_free=0
+    if [[ "$disk_free" -gt 2 ]]; then
+        log_info "  Disk: ${disk_free}GB free ✅"
+    else
+        log_warn "  Disk: ${disk_free}GB free (<2 GB) — may fail during package install"
+        all_passed=false
+    fi
+    
+    # Check 3: DNS works
+    log_info "Checking DNS..."
+    if ssh "${ssh_args[@]}" "${ssh_user}@${vm_ip}" \
+        "getent hosts archive.ubuntu.com >/dev/null 2>&1" 2>/dev/null; then
+        log_info "  DNS working ✅"
+    else
+        log_warn "  DNS not working — apt-get will fail"
+        all_passed=false
+    fi
+    
+    # Check 4: Python available
+    log_info "Checking Python..."
+    if ssh "${ssh_args[@]}" "${ssh_user}@${vm_ip}" \
+        "which python3 >/dev/null 2>&1" 2>/dev/null; then
+        local py_ver
+        py_ver=$(ssh "${ssh_args[@]}" "${ssh_user}@${vm_ip}" \
+            "python3 --version 2>&1" 2>/dev/null) || py_ver="unknown"
+        log_info "  Python: ${py_ver} ✅"
+    else
+        log_warn "  Python not installed — bootstrap may fail"
+        all_passed=false
+    fi
+    
+    if $all_passed; then
+        log_success "VM capability VERIFIED — ready for workload"
+        return 0
+    else
+        # PP-TP3: Capability degraded — use LLM to assess severity
+        local cap_summary="VM at ${vm_ip}:\n"
+        if ssh "${ssh_args[@]}" "${ssh_user}@${vm_ip}" "grep -q -E 'avx2|sse4_2' /proc/cpuinfo" 2>/dev/null; then
+            cap_summary+="- CPU: AVX2/SSE4.2 ✅\n"
+        else
+            cap_summary+="- CPU: MISSING AVX2/SSE4.2 ❌\n"
+        fi
+        cap_summary+="- Disk: ${disk_free}GB free\n"
+        cap_summary+="- DNS: $(ssh "${ssh_args[@]}" "${ssh_user}@${vm_ip}" "getent hosts archive.ubuntu.com >/dev/null 2>&1 && echo '✅' || echo '❌'" 2>/dev/null)\n"
+        cap_summary+="- OS type: ${VM_OS_TYPE}"
+        
+        local llm_assessment
+        llm_assessment=$(_linus_llm_eval "proxmox-bootstrap-judge" "${cap_summary}" 2>/dev/null) || llm_assessment=""
+        
+        if [[ "$llm_assessment" == "VERIFIED" ]]; then
+            log_success "LLM override: VM assessed as VERIFIED despite heuristic warnings"
+            return 0
+        fi
+        
+        log_warn "VM capability DEGRADED — some checks failed (see above)"
+        _warn_tag "capability_degraded"
+        if [[ -n "$llm_assessment" ]]; then
+            log_info "LLM assessment: ${llm_assessment}"
+        fi
+        # Return 8 = quality gate failure (not a hard error, but degraded)
+        return 8
+    fi
 }
 
 # -----------------------------------------------------------------------------
@@ -787,39 +1792,65 @@ output_result() {
 
     local vm_name="${VM_NAME:-linus-vm-${ALLOCATED_VM_ID}}"
     local ssh_user="${VM_SSH_USER:-ubuntu}"
+    local wall_time_s=$(($(date +%s) - PROVISION_START_TIME))
 
-    # Structured output for parsing
+    # Structured output for parsing (LINUS_RESULT contract)
     linus_success \
         "VM_ID:${ALLOCATED_VM_ID}" \
         "VM_IP:${VM_IP}" \
         "VM_USER:${ssh_user}" \
+        "VM_SSH_KEY:${VM_SSH_KEY:-}" \
         "VM_NAME:${vm_name}" \
         "VM_CPU:${VM_CPU}" \
         "VM_RAM:${VM_RAM}" \
         "VM_DISK:${VM_DISK}" \
         "VM_NODE:${PROXMOX_NODE}" \
-        "VM_OS_TYPE:${VM_OS_TYPE}"
+        "VM_OS_TYPE:${VM_OS_TYPE}" \
+        "VM_TYPE:${VM_TYPE}" \
+        "VM_TEMPLATE_ID:${SELECTED_TEMPLATE_ID}" \
+        "COST:wall_time_s=${wall_time_s}" \
+        "RESOURCE:cpu_cores=${VM_CPU},ram_mb=${VM_RAM},disk_gb=${VM_DISK},host_free_ram_mb=${PROXMOX_FREE_RAM_MB:-0},host_free_disk_gb=${PROXMOX_FREE_DISK_GB:-0}" \
+        "WARNINGS:${LINUS_WARNINGS[*]:-none}"
 }
 
 # -----------------------------------------------------------------------------
 # Function: cleanup_on_error
 # -----------------------------------------------------------------------------
-# Cleanup function called on error
+# Cleanup function called on error (registered as EXIT trap in main)
+# Destroys the VM unless LINUS_KEEP_VM=true (for debugging)
 # -----------------------------------------------------------------------------
 
 cleanup_on_error() {
     local exit_code=$?
     if [[ $exit_code -ne 0 && -n "${ALLOCATED_VM_ID:-}" ]]; then
-        log_warn "Cleaning up VM ${ALLOCATED_VM_ID} due to error..."
-    # PITFALL 13: DELETE requires stopped VM + query params
-    # DELETE does not accept form-encoded body data — must pass as query parameters
-    # Stop the VM first (required for deletion)
-    _pvesh post /nodes/${PROXMOX_NODE}/qemu/${ALLOCATED_VM_ID}/status/stop >/dev/null 2>&1 || true
-    sleep 3
-    
-    # Destroy the VM — pass purge params as QUERY string (NOT --data-raw body)
-    _pvesh delete "/nodes/${PROXMOX_NODE}/qemu/${ALLOCATED_VM_ID}?destroy-unreferenced-disks=1&purge=1" >/dev/null 2>&1 || true
+        if [[ "${LINUS_KEEP_VM:-}" == "true" ]]; then
+            log_warn "Pipeline failed (exit ${exit_code}) — keeping VM ${ALLOCATED_VM_ID} for debugging (LINUS_KEEP_VM=true)"
+            return $exit_code
+        fi
+        
+        log_warn "Pipeline failed (exit ${exit_code}) — destroying VM ${ALLOCATED_VM_ID}"
+        
+        # PITFALL 13: DELETE requires stopped VM + query params
+        # DELETE does not accept form-encoded body data — must pass as query parameters
+        # Stop the VM first (required for deletion)
+        local stop_result
+        stop_result=$(_pvesh post /nodes/${PROXMOX_NODE}/qemu/${ALLOCATED_VM_ID}/status/stop 2>&1) || true
+        log_info "VM ${ALLOCATED_VM_ID} stop: ${stop_result:-ok}"
+        sleep 3
+        
+        # Destroy the VM — pass purge params as QUERY string (NOT --data-raw body)
+        local destroy_result
+        destroy_result=$(_pvesh delete "/nodes/${PROXMOX_NODE}/qemu/${ALLOCATED_VM_ID}?destroy-unreferenced-disks=1&purge=1" 2>&1) || true
+        
+        # Verify destroy succeeded
+        sleep 2
+        if _pvesh get /nodes/${PROXMOX_NODE}/qemu/${ALLOCATED_VM_ID}/status/current >/dev/null 2>&1; then
+            log_error "VM ${ALLOCATED_VM_ID} may still exist after destroy attempt — manual cleanup may be needed"
+        else
+            log_success "VM ${ALLOCATED_VM_ID} destroyed"
+        fi
     fi
+    return $exit_code
 }
 
 # -----------------------------------------------------------------------------
@@ -834,14 +1865,16 @@ main() {
 
     validate_environment || exit $?
     detect_network_config || exit $?
+    discover_host_capacity || true  # Non-fatal: capacity warning only, pipeline continues
     allocate_vm_id || exit $?
     clone_template || exit $?
-    configure_network_for_os_type || exit $?  # NEW: Configure network after clone
+    configure_network_for_os_type || exit $?
     configure_vm || exit $?
     regenerate_cloudinit || exit $?  # Must be after all config, before start
     start_vm || exit $?
     wait_for_network || exit $?
     verify_ssh_ready || exit $?
+    verify_vm_capability || true     # Quality gate — warn but don't abort
     output_result
 
     # Disable cleanup trap on success

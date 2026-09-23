@@ -20,6 +20,7 @@ This guide enables coding and QA agents to autonomously:
 ## Quick Navigation
 
 - [Installation](#installation-autonomous-agent-workflow) - Complete setup from scratch
+- [Model Deployment (llama.cpp)](#model-deployment-llamacpp) - Deploy LLM inference servers ★
 - [Provider Configuration](#provider-configuration) - Configure Proxmox, AWS, or QEMU
 - [VM Provisioning](#vm-provisioning-workflows) - Create VMs with exact commands
 - [Verification](#verification-procedures) - Confirm successful operations
@@ -173,6 +174,45 @@ echo "✓ All scripts validated"
 ```
 
 **Installation Complete** - Proceed to [Provider Configuration](#provider-configuration)
+
+---
+
+## Model Deployment (llama.cpp)
+
+> **⚠️ IMPORTANT: If your task is to deploy an LLM inference server, use THESE scripts — NOT the VM provisioning scripts.**
+
+### When to use these scripts
+
+| Your task | Correct script |
+|-----------|---------------|
+| Deploy llama.cpp + model on an existing Ubuntu machine | `shared/deploy/llama-cpp.sh` |
+| Benchmark token speed of a running server | `shared/deploy/llama-bench.sh` |
+| Create a NEW virtual machine from scratch | `shared/provision/proxmox.sh` (or aws/qemu) |
+| Set up a fresh Ubuntu VM (packages, users, etc.) | `shared/bootstrap/ubuntu.sh` |
+
+### Deploy llama.cpp Server
+
+```bash
+# On the target Ubuntu machine, one command:
+export LLAMA_MODEL_URL=https://huggingface.co/deepreinforce-ai/Ornith-1.0-35B-GGUF/resolve/main/ornith-1.0-35b-Q4_K_M.gguf
+./shared/deploy/llama-cpp.sh
+```
+
+**What it does:** Downloads llama.cpp binary + Vulkan libs, downloads model (skips if already present with byte-for-byte verification), creates systemd service, starts server, verifies inference.
+
+**Key env vars:** `LLAMA_MODEL_URL` (required), `LLAMA_PORT` (default 1234), `LLAMA_CTX_SIZE` (default 32768), `LLAMA_N_GPU_LAYERS` (default 99, auto-0 if no GPU detected).
+
+**Exit codes:** 0=success, 4=llama.cpp download failed, 5=model download failed, 6=server start failed, 7=health check timeout.
+
+### Benchmark Token Speed
+
+```bash
+BENCH_URL=http://192.168.101.21:1234/v1/chat/completions \
+  BENCH_MAX_TOKENS=*** \
+  ./shared/deploy/llama-bench.sh
+```
+
+**Outputs:** Time-to-first-token (TTFT), tokens/second, wall-clock time, recommended agent timeouts.
 
 ---
 

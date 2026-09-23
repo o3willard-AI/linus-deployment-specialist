@@ -541,6 +541,65 @@ curl -sSL https://raw.githubusercontent.com/yourusername/linusstr/master/shared/
 
 ---
 
+## 🤖 LLM Model Deployment (llama.cpp)
+
+> **Deploy llama.cpp inference servers on existing Ubuntu systems — NOT for VM provisioning.**
+
+### Quick Deploy (one command)
+
+```bash
+# On the target Ubuntu machine:
+export LLAMA_MODEL_URL=https://huggingface.co/deepreinforce-ai/Ornith-1.0-35B-GGUF/resolve/main/ornith-1.0-35b-Q4_K_M.gguf
+./shared/deploy/llama-cpp.sh
+```
+
+This single command will:
+1. Download the llama.cpp binary + Vulkan/CUDA libraries
+2. Download the model GGUF (skips if already downloaded with byte-for-byte verification)
+3. Create a systemd service (survives reboots)
+4. Start the server and wait for the model to load
+5. Verify inference with a quality gate
+
+### Performance Benchmark
+
+```bash
+# Measure TTFT (time-to-first-token) and tokens/second
+BENCH_URL=http://192.168.101.21:1234/v1/chat/completions \
+  BENCH_MAX_TOKENS=*** \
+  ./shared/deploy/llama-bench.sh
+```
+
+Outputs: TTFT, tok/s, wall-clock time, and timeout recommendations for agent tasks.
+
+### Script Reference
+
+| Script | Purpose | When to use |
+|--------|---------|-------------|
+| `shared/deploy/llama-cpp.sh` | Deploy llama.cpp server + model | Deploying an LLM inference server on Ubuntu |
+| `shared/deploy/llama-bench.sh` | Benchmark token speed | Measuring model performance, setting agent timeouts |
+| `shared/provision/proxmox.sh` | Provision Proxmox VM | Creating new VMs (NOT for model deployment) |
+| `shared/bootstrap/ubuntu.sh` | Bootstrap OS on new VM | First-time OS setup on a fresh VM (NOT for model deployment) |
+
+### Configuration (llama-cpp.sh)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LLAMA_MODEL_URL` | **Required** | Full URL to GGUF model file |
+| `LLAMA_PORT` | `1234` | Server port |
+| `LLAMA_CTX_SIZE` | `32768` | Context window size |
+| `LLAMA_N_GPU_LAYERS` | `99` | GPU layers to offload (auto-detects to 0 if no GPU) |
+| `LLAMA_INSTALL_DIR` | `/opt/llama.cpp` | Installation directory |
+
+### Configuration (llama-bench.sh)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BENCH_URL` | **Required** | Chat completions endpoint |
+| `BENCH_MAX_TOKENS` | `512` | Tokens to generate per run |
+| `BENCH_RUNS` | `3` | Number of benchmark runs |
+
+---
+
 ## 📁 Project Structure
 
 ```
@@ -560,7 +619,9 @@ linusstr/
 │   │   ├── dev-tools.sh    # Python, Node.js, Docker (366 lines)
 │   │   └── base-packages.sh # Build tools (245 lines)
 │   │
-│   ├── deploy/             # Artifact deployment for QA testing
+│   ├── deploy/             # Deployment scripts
+│   │   ├── llama-cpp.sh    # llama.cpp server deployment (510 lines) ★
+│   │   ├── llama-bench.sh  # llama.cpp benchmark (376 lines) ★
 │   │   └── artifact.sh     # Transfer files to provisioned VMs (280 lines)
 │   │
 │   ├── test/               # Test execution and reporting
