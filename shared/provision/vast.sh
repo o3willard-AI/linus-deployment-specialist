@@ -68,6 +68,9 @@ readonly VAST_MIN_DISK="${VAST_MIN_DISK:-}"
 readonly VAST_IMAGE="${VAST_IMAGE:-nvidia/cuda:12.4.0-devel-ubuntu22.04}"
 readonly VAST_API_KEY_NAME="${VAST_API_KEY_NAME:-linus-inference}"
 
+# P1.4: Cost tracking — provision start time for LINUS_COST wall time
+readonly PROVISION_START_TIME=$(date +%s)
+
 # Instance state (populated during provisioning)
 ALLOCATED_OFFER_ID=""
 ALLOCATED_CONTRACT_ID=""
@@ -239,9 +242,30 @@ PYEOF
     return 0
 }
 
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# Function: _pick_offer_fallback
+# ----------------------------------------------------------------------------
+# Deterministic offer picker for when the LLM offer-select is unavailable
+# or returns garbage (P2.7). Delegates to shared/lib/pick-vast-offer.py:
+# honors LINUS_EXCLUDED_HOSTS (host_id AND machine_id), and on retry
+# prefers a different geolocation than the top offer.
+# Args: offers_json
+# Prints: "<offer_id> <dph_total>"
+# ----------------------------------------------------------------------------
+
+_pick_offer_fallback() {
+    local offers_json="$1"
+    local picker="$SCRIPT_DIR/../lib/pick-vast-offer.py"
+    local -a excl=()
+    if [[ -n "${LINUS_EXCLUDED_HOSTS:-}" ]]; then
+        read -ra excl <<< "$LINUS_EXCLUDED_HOSTS"
+    fi
+    echo "$offers_json" | python3 "$picker" "${excl[@]}" 2>/dev/null || true
+}
+
+# ----------------------------------------------------------------------------
 # Function: search_offers
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 
 search_offers() {
     log_step "2" "Searching Vast.ai offers"
@@ -290,6 +314,7 @@ for entry in raw:
 offers = json.load(sys.stdin)
 filtered = [o for o in offers
     if str(o.get('host_id','')) not in machine_excludes
+    and str(o.get('machine_id','')) not in machine_excludes
     and str(o.get('id','')) not in offer_excludes]
 json.dump(filtered, sys.stdout)
 " 2>/dev/null) || true
@@ -356,19 +381,37 @@ print(offers[${selected_json_idx}].get('dph_total','0'))
 " 2>/dev/null) || true
                     log_info "[llm-eval] Selected offer #${selected_idx} (${offer_id})"
                 else
-                    log_warn "[llm-eval] Unexpected response '${selected_idx}' — falling back to offer #1"
-                    offer_id=$(echo "$search_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['id'])" 2>/dev/null) || true
-                    instance_price=$(echo "$search_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('dph_total','0'))" 2>/dev/null) || true
+                    log_warn "[llm-eval] Unexpected response '${selected_idx}' — falling back to deterministic picker"
+                    local picked
+                    picked=$(_pick_offer_fallback "$search_output")
+                    offer_id=$(echo "$picked" | awk '{print $1}')
+                    instance_price=$(echo "$picked" | awk '{print $2}')
+                    [[ -n "$offer_id" ]] || {
+                        offer_id=$(echo "$search_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['id'])" 2>/dev/null) || true
+                        instance_price=$(echo "$search_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('dph_total','0'))" 2>/dev/null) || true
+                    }
                 fi
             else
-                # Fallback: take first offer
-                offer_id=$(echo "$search_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['id'])" 2>/dev/null) || true
-                instance_price=$(echo "$search_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('dph_total','0'))" 2>/dev/null) || true
+                # Fallback: deterministic picker (exclusion + diversity aware)
+                local picked
+                picked=$(_pick_offer_fallback "$search_output")
+                offer_id=$(echo "$picked" | awk '{print $1}')
+                instance_price=$(echo "$picked" | awk '{print $2}')
+                [[ -n "$offer_id" ]] || {
+                    offer_id=$(echo "$search_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['id'])" 2>/dev/null) || true
+                    instance_price=$(echo "$search_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('dph_total','0'))" 2>/dev/null) || true
+                }
             fi
         else
-            # No LLM eval available — take first offer
-            offer_id=$(echo "$search_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['id'])" 2>/dev/null) || true
-            instance_price=$(echo "$search_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('dph_total','0'))" 2>/dev/null) || true
+            # No LLM eval available — deterministic picker
+            local picked
+            picked=$(_pick_offer_fallback "$search_output")
+            offer_id=$(echo "$picked" | awk '{print $1}')
+            instance_price=$(echo "$picked" | awk '{print $2}')
+            [[ -n "$offer_id" ]] || {
+                offer_id=$(echo "$search_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['id'])" 2>/dev/null) || true
+                instance_price=$(echo "$search_output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('dph_total','0'))" 2>/dev/null) || true
+            }
         fi
     fi
 
@@ -582,6 +625,11 @@ wait_for_ssh() {
 output_result() {
     log_step "6" "Generating output"
 
+    # P1.4: Cost summary (shared helper) — linus_result emits this as
+    # LINUS_COST:total_usd=...,instance_price=...,wall_time_s=...
+    local cost_summary
+    cost_summary=$(_linus_cost_summary "${ALLOCATED_INSTANCE_PRICE:-0}" $(( $(date +%s) - PROVISION_START_TIME )))
+
     linus_success \
         "CONTRACT_ID:${ALLOCATED_CONTRACT_ID}" \
         "SSH_HOST:${ALLOCATED_SSH_HOST}" \
@@ -591,6 +639,7 @@ output_result() {
         "CUDA_ARCH:${VAST_CUDA_ARCH}" \
         "IMAGE:${VAST_IMAGE}" \
         "INSTANCE_PRICE:${ALLOCATED_INSTANCE_PRICE:-0}" \
+        "${cost_summary}" \
         "WARNINGS:${LINUS_WARNINGS[*]:-none}"
 }
 
