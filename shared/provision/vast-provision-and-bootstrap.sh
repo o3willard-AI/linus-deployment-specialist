@@ -29,8 +29,8 @@ IFS=$'\n\t'
 
 export PYTHONUNBUFFERED=1
 
-readonly SCRIPT_NAME="$(basename "$0")"
-readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+readonly SCRIPT_NAME="$(basename "${BASH_SOURCE[0]:-$0}")"
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 readonly REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # Source shared libraries
@@ -102,6 +102,7 @@ parse_linus_result() {
             SSH_PORT)        PARSED_SSH_PORT="$val" ;;
             PROXY_PORT)      PARSED_PROXY_PORT="$val" ;;
             INSTANCE_PRICE)  PARSED_INSTANCE_PRICE="$val" ;;
+            COST)            PARSED_LINUS_COST="$val" ;;
             GPU)             PARSED_GPU="$val" ;;
         esac
     done < <(echo "$output" | grep -E '^LINUS_' || true)
@@ -215,6 +216,9 @@ print(f'{h}h {m}m {s}s')
         total_cost=$(python3 -c "print(round(${PARSED_INSTANCE_PRICE} * ${total_seconds} / 3600, 4))" 2>/dev/null) || total_cost="?"
         log_info "  Cost:          \$${total_cost} (@ \$${PARSED_INSTANCE_PRICE}/hr × ${wall_time})"
     fi
+    if [[ -n "${PARSED_LINUS_COST:-}" ]]; then
+        log_info "  LINUS_COST:    ${PARSED_LINUS_COST}"
+    fi
 }
 
 # ─── Main ──────────────────────────────────────────────────────────
@@ -239,6 +243,21 @@ main() {
     # Phase 3: Summary
     print_summary
     log_success "Pipeline completed successfully"
+
+    # Machine-readable result line (P1.3/P1.4) — single-line summary for
+    # agents/harnesses: CONTRACT_ID + API_URL + LINUS_COST.
+    # Note: vast.sh sleeps 3s after its SSH probe before returning
+    # (P2.8 cooldown window — Vast proxy rate-limits back-to-back
+    # connections), so this bootstrap start is already outside the
+    # rate-limit window.
+    local final_cost="${PARSED_LINUS_COST:-}"
+    if [[ -z "$final_cost" && -n "${PARSED_INSTANCE_PRICE:-}" && "$PARSED_INSTANCE_PRICE" != "0" ]]; then
+        local total_seconds=$(( $(date +%s) - PIPELINE_START_TIME ))
+        local total_cost
+        total_cost=$(python3 -c "print(round(${PARSED_INSTANCE_PRICE} * ${total_seconds} / 3600, 4))" 2>/dev/null) || total_cost="?"
+        final_cost="total_usd=${total_cost},instance_price=${PARSED_INSTANCE_PRICE},wall_time_s=${total_seconds}"
+    fi
+    echo "LINUS_RESULT:SUCCESS API_URL:http://${PARSED_SSH_HOST}:${PARSED_PROXY_PORT}/v1 CONTRACT_ID:${PARSED_CONTRACT_ID} LINUS_COST:${final_cost:-wall_time_s=0}"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
