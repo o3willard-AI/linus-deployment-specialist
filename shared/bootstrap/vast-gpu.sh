@@ -227,21 +227,27 @@ verify_build() {
             local build_active
             build_active=$(eval "$ssh_cmd \"pgrep -f 'cmake|make|cc1plus|nvcc' >/dev/null 2>&1 && echo BUILDING || echo IDLE\"" 2>/dev/null) || true
 
-            # P2.6: Fatal pattern detection — check onstart.log for errors
+            # P2.6: Fatal pattern detection — abort immediately, do not
+            # wait out the 900s timeout on a build that already died.
             local onstart_tail
             onstart_tail=$(eval "$ssh_cmd \"tail -30 /var/log/onstart.log 2>/dev/null || echo NO_LOG\"" 2>/dev/null) || true
             if [[ "$onstart_tail" != "NO_LOG" ]]; then
                 if ! _linus_check_fatal_build_errors "$onstart_tail"; then
-                    # TP2: Non-deterministic LLM build watch — confirm abort decision
-                    if [[ $(( waited % llm_check_interval )) -lt $poll_interval || $waited -ge 300 ]]; then
-                        local llm_decision
-                        llm_decision=$(_linus_llm_build_watch "$waited" "$build_active" "$onstart_tail")
-                        log_info "[llm-eval] Build watch (${waited}s): ${llm_decision}"
-                        if [[ "$llm_decision" == ABORT:* ]]; then
-                            log_error "Build watch LLM recommends abort: ${llm_decision#ABORT:}"
-                            log_error "Last build output:\n${onstart_tail}"
-                            return 4
-                        fi
+                    log_error "Fatal build error detected at ${waited}s — aborting without waiting for the full ${max_build_wait}s timeout"
+                    log_error "Last build output:\n${onstart_tail}"
+                    return 4
+                fi
+                # TP2: Non-deterministic LLM build watch for the
+                # slow-but-progressing vs truly-stalled judgment call
+                # (only reached when no fatal pattern matched).
+                if [[ $(( waited % llm_check_interval )) -lt $poll_interval || $waited -ge 300 ]]; then
+                    local llm_decision
+                    llm_decision=$(_linus_llm_build_watch "$waited" "$build_active" "$onstart_tail")
+                    log_info "[llm-eval] Build watch (${waited}s): ${llm_decision}"
+                    if [[ "$llm_decision" == ABORT:* ]]; then
+                        log_error "Build watch LLM recommends abort: ${llm_decision#ABORT:}"
+                        log_error "Last build output:\n${onstart_tail}"
+                        return 4
                     fi
                 fi
             fi
@@ -308,27 +314,9 @@ download_model() {
     fi
     log_info "HuggingFace reachable"
 
-    # --- Range-request size check (P0.1 fix — robust Python parsing) ---
-    log_info "Checking model file size via Range request..."
-    local total_bytes
-    total_bytes=$(_linus_get_model_size_bytes "$MODEL_URL") || total_bytes=0
-
-    if [[ "$total_bytes" -gt 0 ]]; then
-        local total_gb
-        total_gb=$(python3 -c "print(round(${total_bytes} / 1073741824, 2))" 2>/dev/null || echo "?")
-        log_info "Model size: ${total_gb} GB (${total_bytes} bytes)"
-    else
-        log_warn "Could not determine model size via Range request — proceeding anyway"
-    fi
-
-    # --- Check disk space (only if we got a real size) ---
-    if [[ "$total_bytes" -gt 0 ]]; then
-        if ! _linus_check_disk_space "$ssh_cmd" "$INSTANCE_WORKSPACE" "$total_bytes"; then
-            return 5
-        fi
-    else
-        log_warn "Could not determine model size — skipping disk space check"
-    fi
+    # --- Range-request size check + disk space (P0.1 + P1.5) ---
+    # Shared helper, identical to the _try_model() fallback path.
+    _check_model_size_and_disk "$MODEL_URL" "Model" || return 5
 
     # --- Download with multi-strategy retry ---
     # retry_model_download handles: curl with resume, wget fallback,
@@ -507,22 +495,9 @@ _try_model() {
 
     log_info "Trying model: ${label}"
 
-    # P1.5: Content-Range size check for fallback models (same as download_model)
-    log_info "Checking fallback model size..."
-    local try_bytes
-    try_bytes=$(_linus_get_model_size_bytes "$try_model_url") || try_bytes=0
-    if [[ "$try_bytes" -gt 0 ]]; then
-        local try_gb
-        try_gb=$(python3 -c "print(round(${try_bytes} / 1073741824, 2))" 2>/dev/null || echo "?")
-        log_info "Fallback model size: ${try_gb} GB"
-
-        # Check disk space
-        local ssh_cmd
-        ssh_cmd="ssh $(_ssh_args) -p ${SSH_PORT} root@${SSH_HOST}"
-        if ! _linus_check_disk_space "$ssh_cmd" "$INSTANCE_WORKSPACE" "$try_bytes"; then
-            return 5
-        fi
-    fi
+    # P1.5: shared size+disk pre-flight for fallback models
+    # (same helper as download_model — no blind fallback downloads)
+    _check_model_size_and_disk "$try_model_url" "Fallback model" || return 5
 
     # Download with alternate model
     local ssh_key
@@ -601,20 +576,15 @@ _try_model() {
 output_result() {
     log_step "7" "Generating output"
 
-    # P1.4: Compute cost summary
+    # P1.4: Cost summary (shared helper) — linus_result emits this as
+    # LINUS_COST:total_usd=...,instance_price=...,wall_time_s=...
     local end_time wall_time
     end_time=$(date +%s)
     wall_time=$(( end_time - LINUS_START_TIME ))
 
-    local cost_summary=""
-    if [[ -n "${LINUS_INSTANCE_PRICE:-}" && "$LINUS_INSTANCE_PRICE" != "0" ]]; then
-        local total_cost
-        total_cost=$(python3 -c "print(round(${LINUS_INSTANCE_PRICE} * ${wall_time} / 3600, 4))" 2>/dev/null) || total_cost="?"
-        cost_summary="COST:total_usd=${total_cost},instance_price=${LINUS_INSTANCE_PRICE},wall_time_s=${wall_time}"
-        log_info "Cost: \$${total_cost} (${wall_time}s @ \$${LINUS_INSTANCE_PRICE}/hr)"
-    else
-        cost_summary="COST:wall_time_s=${wall_time}"
-    fi
+    local cost_summary
+    cost_summary=$(_linus_cost_summary "${LINUS_INSTANCE_PRICE:-}" "$wall_time")
+    log_info "Cost: ${cost_summary#LINUS_}"
 
     linus_success \
         "API_URL:${CHAT_URL}" \

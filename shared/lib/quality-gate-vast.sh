@@ -23,7 +23,11 @@ _linus_check_fatal_build_errors() {
     log_lower=$(echo "$log_tail" | tr '[:upper:]' '[:lower:]')
 
     # Fatal patterns that mean the build is dead
+    # (P2.6 — includes the generic compiler/make failure signatures)
     local fatal_patterns=(
+        "error:"
+        "failed:"
+        "no such file"
         "cmake error"
         "cuda compiler not found"
         "cuda toolkit not found"

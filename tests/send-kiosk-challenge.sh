@@ -15,6 +15,11 @@ API_KEY="${API_KEY:-}"
 SPEC_FILE="$(dirname "$0")/challenge-prompt-chat.json"
 ENDPOINT="http://${IP}:${PORT}/v1/chat/completions"
 
+# P1.4: cost tracking — caller (driver/bootstrap) may pass LINUS_COST
+# (e.g. LINUS_COST="total_usd=0.1234,instance_price=0.5,wall_time_s=888")
+# or LINUS_INSTANCE_PRICE; surfaced in the manifest below.
+LINUS_COST="${LINUS_COST:-}"
+
 mkdir -p "$OUTDIR"
 exec > >(tee "$OUTDIR/run.log") 2>&1
 
@@ -134,6 +139,7 @@ FILE_COUNT=$((FILE_COUNT / 2))
 echo ""
 echo "=== Results ==="
 echo "Wall time:  ${ELAPSED}s"
+echo "Cost:       ${LINUS_COST:-unknown}"
 echo "Tokens:     ${USAGE}"
 echo "Content:    ${CONTENT_CHARS} chars"
 echo "Files:      ~${FILE_COUNT}"
@@ -182,6 +188,7 @@ cat > "$OUTDIR/manifest.json" << EOF
   "canary_repeat_pct": $REPEAT_PCT,
   "endpoint": "$ENDPOINT",
   "wall_time_s": $ELAPSED,
+  "linus_cost": "$LINUS_COST",
   "content_chars": $CONTENT_CHARS,
   "file_count": $FILE_COUNT,
   "max_5gram_repeat": $REPEAT_SCORE,
