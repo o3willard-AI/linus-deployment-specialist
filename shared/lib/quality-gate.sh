@@ -19,9 +19,12 @@
 # Returns: size in bytes (or 0 if undetermined)
 _linus_get_model_size_bytes() {
     local url="$1"
-    python3 -c "
+    # Pass the URL via argv (not shell interpolation) so a crafted
+    # repo/file name in a fallback URL cannot break out of the Python string.
+    python3 - "$url" <<'PYEOF' 2>/dev/null
 import urllib.request, sys
-req = urllib.request.Request('${url}')
+url = sys.argv[1]
+req = urllib.request.Request(url)
 req.add_header('Range', 'bytes=0-0')
 try:
     resp = urllib.request.urlopen(req, timeout=15)
@@ -41,7 +44,7 @@ try:
 except Exception as e:
     print('0', file=sys.stderr)
     print('0')
-" 2>/dev/null
+PYEOF
 }
 
 # ─── Disk Space Check ─────────────────────────────────────────────
@@ -78,6 +81,58 @@ _linus_check_disk_space() {
 
     log_info "Disk space OK: ${disk_free}GB free, need ~${needed_gb}GB"
     return 0
+}
+
+# ─── Shared Size + Disk Pre-flight (P1.5) ──────────────────────────
+
+# Range-requests the model URL for its size, then checks remote disk
+# space. Used by BOTH download_model() (primary) and _try_model()
+# (fallbacks) so fallback downloads get the same pre-flight guard.
+#
+# Args: model_url [label]
+# Returns: 0 if download may proceed (size known + disk OK, or size
+#          unknown — warn and proceed, matching primary-path behavior),
+#          5 if disk is insufficient (do not attempt the download).
+_check_model_size_and_disk() {
+    local url="$1"
+    local label="${2:-model}"
+    local ssh_cmd
+    ssh_cmd="ssh $(_ssh_args) -p ${SSH_PORT} root@${SSH_HOST}"
+
+    local total_bytes
+    total_bytes=$(_linus_get_model_size_bytes "$url") || total_bytes=0
+
+    if [[ "$total_bytes" -gt 0 ]]; then
+        local total_gb
+        total_gb=$(python3 -c "print(round(${total_bytes} / 1073741824, 2))" 2>/dev/null || echo "?")
+        log_info "${label} size: ${total_gb} GB (${total_bytes} bytes)"
+        if ! _linus_check_disk_space "$ssh_cmd" "$INSTANCE_WORKSPACE" "$total_bytes"; then
+            return 5
+        fi
+    else
+        log_warn "Could not determine ${label} size — skipping disk space check"
+    fi
+    return 0
+}
+
+# ─── Cost Summary (P1.4) ────────────────────────────────────────────
+
+# Builds the COST pair consumed by linus_result (emitted as
+# LINUS_COST:total_usd=...,instance_price=...,wall_time_s=...).
+#
+# Args: instance_price_per_hour wall_time_seconds
+# Prints: COST:total_usd=X.XXXX,instance_price=Y,wall_time_s=Z
+#         (or COST:wall_time_s=Z when price is unknown/zero)
+_linus_cost_summary() {
+    local price="$1"
+    local wall_time="$2"
+    if [[ -n "$price" && "$price" != "0" && "$wall_time" =~ ^[0-9]+$ ]]; then
+        local total_cost
+        total_cost=$(python3 -c "print(round(${price} * ${wall_time} / 3600, 4))" 2>/dev/null || echo "?")
+        echo "COST:total_usd=${total_cost},instance_price=${price},wall_time_s=${wall_time}"
+    else
+        echo "COST:wall_time_s=${wall_time}"
+    fi
 }
 
 # ─── 5-Gram Semantic Degeneration Gate (P0.2 fix) ─────────────────
